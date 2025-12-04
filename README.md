@@ -6,11 +6,11 @@
 - `desk.py` — Desk ESP32. Reads a toggle (GPIO 15, to GND) and sends HTTP to the door ESP32.
 - `door.py` — Door ESP32. Hosts a tiny web UI and REST API and drives the relay on GPIO 2 (active HIGH).
 - `wiring-diagram.svg` — A simple wiring diagram covering both boards and the AC relay wiring.
-- `/desk_unit_3D/ — Folder that stores the 3D Priting files for the door unit with bulb
-- `/door_unit_3D/DND_E26_DrillTemplate.dxf — ?
-- `/door_unit_3D/DND_E26_WallMount.scad — ?
-- `/door_unit_3D/README.md — specific info for printing included
-- `/desk_unit_3D — Folder that stores the 3D Priting files the desk unit with switch
+- `/desk_unit_3D/` — Folder that stores the 3D Priting files for the door unit with bulb
+- `/door_unit_3D/DND_E26_DrillTemplate.dxf` — ?
+- `/door_unit_3D/DND_E26_WallMount.scad` — ?
+- `/door_unit_3D/README.md` — specific info for printing included
+- `/desk_unit_3D` — Folder that stores the 3D Priting files the desk unit with switch
 - This README.
 
 ## Flash MicroPython
