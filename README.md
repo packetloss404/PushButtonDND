@@ -57,6 +57,4 @@
 - Do not share low-voltage wiring inside the AC compartment.
 - If unsure about mains wiring, consult a qualified electrician.
 
----
-Pack generated on 2025-11-04T20:42:59.
-# PushButtonDNS
+> Don't be a dumbass!
