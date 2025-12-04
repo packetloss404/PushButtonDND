@@ -31,18 +31,141 @@ def set_output(on):
 def html_page():
     status = "ON" if is_on else "OFF"
     color = "#f44336" if is_on else "#4CAF50"
-    return f"""<!doctype html><html><head>
-    <meta name="viewport" content="width=device-width,initial-scale=1">
-    <title>Do Not Disturb Light</title>
-    <style>
-      body {{ font-family: sans-serif; text-align:center; margin-top:30px; }}
-      button {{ font-size:22px; padding:15px 40px; margin:10px; border:0; border-radius:10px; color:#fff; }}
-    </style></head>
-    <body>
-      <h1>Status: <span style='color:{color}'>{status}</span></h1>
-      <button style='background:#f44336' onclick="location='/api/set?on=1{('&token='+AUTH_TOKEN) if AUTH_TOKEN else ''}'">ON</button>
-      <button style='background:#4CAF50' onclick="location='/api/set?on=0{('&token='+AUTH_TOKEN) if AUTH_TOKEN else ''}'">OFF</button>
-    </body></html>"""
+    return f"""<!doctype html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PushButtonDND</title>
+
+<style>
+  :root {{
+    --bg: #1e1e1e;
+    --text: #ffffff;
+    --card: #2c2c2c;
+  }}
+
+  body.light {{
+    --bg: #f0f0f0;
+    --text: #000000;
+    --card: #ffffff;
+  }}
+
+  body {{
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Segoe UI", sans-serif;
+    margin: 0;
+    padding: 40px 20px;
+    text-align: center;
+    transition: background 0.3s, color 0.3s;
+  }}
+
+  #themeToggle {{
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    background: var(--card);
+    border: 0;
+    border-radius: 20px;
+    padding: 8px 14px;
+    font-size: 14px;
+    cursor: pointer;
+    color: var(--text);
+    box-shadow: 0 0 10px rgba(0,0,0,0.2);
+    transition: background 0.3s, color 0.3s, transform 0.2s;
+  }}
+  #themeToggle:hover {{
+    transform: scale(1.07);
+  }}
+
+  h1 {{
+    margin-top: 50px;
+    font-size: 32px;
+    text-shadow: 0 0 10px rgba(255,255,255,0.2);
+  }}
+
+  .glow-ring {{
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 140px;
+    height: 140px;
+    border-radius: 50%;
+    border: 5px solid {color};
+    margin: 40px auto;
+    font-size: 32px;
+    color: {color};
+    font-weight: bold;
+    animation: pulseGlow 1.7s infinite ease-in-out;
+    box-shadow: 0 0 20px {color}, 0 0 40px {color};
+  }}
+
+  @keyframes pulseGlow {{
+    0%, 100% {{
+      transform: scale(1);
+      box-shadow: 0 0 15px {color}, 0 0 35px {color};
+    }}
+    50% {{
+      transform: scale(1.05);
+      box-shadow: 0 0 30px {color}, 0 0 60px {color};
+    }}
+  }}
+
+  button.action {{
+    font-size: 22px;
+    padding: 15px 50px;
+    margin: 15px;
+    border: 0;
+    border-radius: 12px;
+    color: #fff;
+    cursor: pointer;
+    transition: transform 0.2s, box-shadow 0.2s;
+  }}
+  button.action:hover {{
+    transform: scale(1.08);
+    box-shadow: 0 0 15px rgba(255,255,255,0.3);
+  }}
+
+  .btn-on {{
+    background: linear-gradient(135deg, #d32f2f, #ff5252);
+  }}
+
+  .btn-off {{
+    background: linear-gradient(135deg, #2e7d32, #66bb6a);
+  }}
+</style>
+</head>
+
+<body>
+
+<button id="themeToggle" onclick="toggleTheme()">🌙 Dark</button>
+
+<h1>Status:</h1>
+
+<div class="glow-ring">{status}</div>
+
+<button class="action btn-on"
+ onclick="location='/api/set?on=1{('&token='+AUTH_TOKEN) if AUTH_TOKEN else ''}'">
+  ON
+</button>
+
+<button class="action btn-off"
+ onclick="location='/api/set?on=0{('&token='+AUTH_TOKEN) if AUTH_TOKEN else ''}'">
+  OFF
+</button>
+
+<script>
+function toggleTheme() {{
+  document.body.classList.toggle("light");
+  let isLight = document.body.classList.contains("light");
+  document.getElementById("themeToggle").textContent =
+    isLight ? "☀️ Light" : "🌙 Dark";
+}}
+</script>
+
+</body>
+</html>
+"""
 
 def forbidden(s):
     s.send("HTTP/1.1 403 Forbidden\r\n\r\nForbidden")
