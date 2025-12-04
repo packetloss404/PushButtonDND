@@ -31,6 +31,8 @@ def set_output(on):
 def html_page():
     status = "ON" if is_on else "OFF"
     color = "#f44336" if is_on else "#4CAF50"
+    token_query = f"&token={AUTH_TOKEN}" if AUTH_TOKEN else ""
+
     return f"""<!doctype html>
 <html>
 <head>
@@ -98,16 +100,15 @@ def html_page():
     font-weight: bold;
     animation: pulseGlow 1.7s infinite ease-in-out;
     box-shadow: 0 0 20px {color}, 0 0 40px {color};
+    transition: border 0.3s, color 0.3s, box-shadow 0.3s;
   }}
 
   @keyframes pulseGlow {{
     0%, 100% {{
       transform: scale(1);
-      box-shadow: 0 0 15px {color}, 0 0 35px {color};
     }}
     50% {{
       transform: scale(1.05);
-      box-shadow: 0 0 30px {color}, 0 0 60px {color};
     }}
   }}
 
@@ -138,19 +139,19 @@ def html_page():
 
 <body>
 
-<button id="themeToggle" onclick="toggleTheme()">🌙 Dark</button>
+<button id="themeToggle" onclick="toggleTheme()">Dark</button>
 
-<h1>Status:</h1>
+<h1>DND Status:</h1>
 
-<div class="glow-ring">{status}</div>
+<div id="glow" class="glow-ring">{status}</div>
 
 <button class="action btn-on"
- onclick="location='/api/set?on=1{('&token='+AUTH_TOKEN) if AUTH_TOKEN else ''}'">
+ onclick="location='/api/set?on=1{token_query}'">
   ON
 </button>
 
 <button class="action btn-off"
- onclick="location='/api/set?on=0{('&token='+AUTH_TOKEN) if AUTH_TOKEN else ''}'">
+ onclick="location='/api/set?on=0{token_query}'">
   OFF
 </button>
 
@@ -159,8 +160,33 @@ function toggleTheme() {{
   document.body.classList.toggle("light");
   let isLight = document.body.classList.contains("light");
   document.getElementById("themeToggle").textContent =
-    isLight ? "☀️ Light" : "🌙 Dark";
+    isLight ? "Light" : "Dark";
 }}
+
+/* ========== LIVE POLLING ========== */
+function pollState() {{
+  fetch('/api/state')
+    .then(r => r.json())
+    .then(data => {{
+      let on = data.on;
+      let glow = document.getElementById("glow");
+
+      // Update ring text
+      glow.textContent = on ? "ON" : "OFF";
+
+      // Colors
+      let c = on ? "#f44336" : "#4CAF50";
+
+      // Apply updates
+      glow.style.borderColor = c;
+      glow.style.color = c;
+      glow.style.boxShadow = "0 0 20px " + c + ", 0 0 40px " + c;
+    }})
+    .catch(e => console.log("Polling error:", e));
+}}
+
+// Poll every second
+setInterval(pollState, 1000);
 </script>
 
 </body>

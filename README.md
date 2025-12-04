@@ -62,3 +62,8 @@
 - If unsure about mains wiring, consult a qualified electrician.
 
 > Don't be a dumbass!
+
+## TODO
+
+- add a physical button override indicator when the toggle switch on the desk side is used
+- add a live JS polling status ring - done 12/3/25
