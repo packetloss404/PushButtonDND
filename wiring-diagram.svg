@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="650">
+  <rect x="10" y="10" width="1080" height="630" rx="16" ry="16" fill="#ffffff" stroke="#000000" stroke-width="1"/>
+  <text x="550" y="40" font-family="Arial" font-size="22" text-anchor="middle">Do Not Disturb Light — ESP32 (MicroPython)</text>
+  <text x="275" y="80" font-family="Arial" font-size="18" text-anchor="middle">Desk Unit (Transmitter)</text>
+  <text x="825" y="80" font-family="Arial" font-size="18" text-anchor="middle">Door Unit (Receiver)</text>
+
+  <rect x="60" y="100" width="430" height="400" rx="12" ry="12" fill="#f6f6f6" stroke="#333" />
+  <text x="85" y="130" font-family="Arial" font-size="14">ESP32 (USB 5V)</text>
+  <rect x="80" y="150" width="160" height="80" fill="#e9e9ff" stroke="#333"/>
+  <text x="160" y="190" font-family="Arial" font-size="13" text-anchor="middle">ESP32</text>
+
+  <rect x="320" y="160" width="120" height="60" fill="#ffe9e9" stroke="#333"/>
+  <text x="380" y="195" font-family="Arial" font-size="13" text-anchor="middle">Toggle Switch</text>
+
+  <line x1="240" y1="170" x2="320" y2="170" stroke="#000" stroke-width="2"/>
+  <text x="280" y="160" font-family="Arial" font-size="12">GPIO 15</text>
+  <line x1="240" y1="210" x2="320" y2="210" stroke="#000" stroke-width="2"/>
+  <text x="280" y="222" font-family="Arial" font-size="12">GND</text>
+
+  <text x="550" y="320" font-family="Arial" font-size="14" text-anchor="middle">Wi‑Fi (HTTP)</text>
+  <path d="M500 340 q50 -60 100 0" fill="none" stroke="#000" stroke-width="2"/>
+  <path d="M510 350 q40 -45 80 0" fill="none" stroke="#000" stroke-width="2"/>
+  <path d="M520 360 q30 -30 60 0" fill="none" stroke="#000" stroke-width="2"/>
+
+  <rect x="610" y="100" width="430" height="400" rx="12" ry="12" fill="#f6f6f6" stroke="#333" />
+  <text x="635" y="130" font-family="Arial" font-size="14">ESP32 (USB 5V)</text>
+  <rect x="630" y="150" width="160" height="80" fill="#e9e9ff" stroke="#333"/>
+  <text x="710" y="190" font-family="Arial" font-size="13" text-anchor="middle">ESP32</text>
+
+  <rect x="870" y="150" width="150" height="100" fill="#e9ffe9" stroke="#333"/>
+  <text x="945" y="170" font-family="Arial" font-size="13" text-anchor="middle">Relay Module</text>
+  <text x="945" y="188" font-family="Arial" font-size="12" text-anchor="middle">VCC | IN | GND</text>
+
+  <line x1="790" y1="170" x2="870" y2="170" stroke="#000" stroke-width="2"/>
+  <text x="830" y="160" font-family="Arial" font-size="12">GPIO 2 → IN</text>
+  <line x1="790" y1="185" x2="870" y2="185" stroke="#000" stroke-width="2"/>
+  <text x="832" y="198" font-family="Arial" font-size="12">5V → VCC</text>
+  <line x1="790" y1="200" x2="870" y2="200" stroke="#000" stroke-width="2"/>
+  <text x="835" y="212" font-family="Arial" font-size="12">GND → GND</text>
+
+  <rect x="890" y="300" width="110" height="70" fill="#fffbe6" stroke="#333"/>
+  <text x="945" y="320" font-family="Arial" font-size="12" text-anchor="middle">COM  |  NO</text>
+  <text x="945" y="338" font-family="Arial" font-size="12" text-anchor="middle">Relay Contacts</text>
+
+  <circle cx="990" cy="420" r="20" stroke="#333" fill="#fff"/>
+  <line x1="990" y1="440" x2="990" y2="470" stroke="#333" />
+  <text x="990" y="495" font-family="Arial" font-size="12" text-anchor="middle">Red Bulb</text>
+
+  <line x1="945" y1="335" x2="1010" y2="420" stroke="#000" stroke-width="2"/>
+  <text x="1000" y="385" font-family="Arial" font-size="12">Hot → Bulb</text>
+  <line x1="945" y1="335" x2="900" y2="335" stroke="#000" stroke-width="2"/>
+  <text x="900" y="325" font-family="Arial" font-size="12" text-anchor="end">Hot (from mains) → COM</text>
+
+  <line x1="930" y1="580" x2="1030" y2="580" stroke="#000" stroke-width="2"/>
+  <text x="980" y="595" font-family="Arial" font-size="12" text-anchor="middle">Neutral → Bulb</text>
+
+  <text x="825" y="560" font-family="Arial" font-size="12" text-anchor="middle">⚠ Switch ONLY the HOT leg. Keep AC isolated.</text>
+  <text x="825" y="580" font-family="Arial" font-size="12" text-anchor="middle">Use an enclosure and strain relief. Follow local code.</text>
+</svg>
