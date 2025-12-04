@@ -13,6 +13,8 @@
 - `/desk_unit_3D` — Folder that stores the 3D Priting files the desk unit with switch
 - This README.
 
+> Still building out the 3D models and final designs
+
 ## Flash MicroPython
 1. Download latest ESP32 MicroPython firmware: https://micropython.org/download/ESP32/
 2. Erase & flash (example on Windows COM3):
@@ -34,6 +36,8 @@
   - `GET /api/set?on=1&token=SECRET123` — Turn ON
   - `GET /api/set?on=0&token=SECRET123` — Turn OFF
   - `GET /api/state` — Read current state
+
+> API's can be fun, ya'll
 
 ## Wiring (summary)
 ### Desk unit (transmitter)
