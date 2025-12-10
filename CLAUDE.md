@@ -52,14 +52,20 @@ Use Thonny IDE for development:
 ## Code Structure
 
 ### door.py (Receiver)
-- **Web server**: Listens on port 80, handles HTTP requests
+- **Web server**: Listens on port 80, handles HTTP requests with 1-second timeout
+- **Configuration**: Loads from `/config.json` via `config.py` module, fallback to hardcoded defaults
+- **MQTT Client**: Connects to broker on startup if enabled, publishes state changes, subscribes to commands
 - **Endpoints**:
-  - `/` - HTML UI with live polling status ring
+  - `/` - HTML UI with live polling status ring and MQTT status indicator
+  - `/config` - Web-based configuration UI with tabbed interface (WiFi, Security, MQTT, Teams)
   - `/api/set?on={0|1}&token={TOKEN}` - Control relay state
-  - `/api/state` - JSON response with current state and uptime
-- **Authentication**: Optional token-based auth via `AUTH_TOKEN`
+  - `/api/state` - JSON response with current state, uptime, and MQTT status
+  - `/api/config` (POST) - Save new configuration and reboot
+  - `/api/config/reset` (POST) - Reset to factory defaults and reboot
+- **Authentication**: Optional token-based auth via `AUTH_TOKEN` (query param or header)
 - **State management**: Global `is_on` flag, `last_change` timestamp
 - **HTML includes**: Embedded CSS/JS with dark/light theme, live polling every 1 second
+- **MQTT Integration**: Non-blocking message checking, automatic reconnection with exponential backoff
 
 ### desk.py (Transmitter)
 - **Switch monitoring**: 50ms polling loop on GPIO 15
@@ -67,14 +73,100 @@ Use Thonny IDE for development:
 - **HTTP client**: Uses `urequests` library to call door's `/api/set`
 - **Logic inversion**: Switch LOW = send ON command (pull-up configuration)
 
+### config.py (NEW - Configuration Management)
+- **Functions**:
+  - `load_config()` - Load from `/config.json`, fallback to defaults
+  - `save_config()` - Atomic save with backup to `/config.json.backup`
+  - `validate_config()` - Validate configuration structure and values
+  - `get_default_config()` - Return hardcoded default configuration
+  - `factory_reset()` - Delete config and reboot
+  - `restore_backup()` - Restore from backup file
+- **Storage**: JSON format on ESP32 flash filesystem
+- **Schema**: Nested dict with wifi, security, mqtt, teams, features sections
+
+### mqtt_client.py (NEW - MQTT Integration)
+- **Class**: `MQTTClient` - Wrapper around `umqtt.simple`
+- **Methods**:
+  - `connect()` - Connect with Last Will and Testament (LWT)
+  - `publish()` - Publish message to topic
+  - `publish_state()` - Publish ON/OFF to state topic
+  - `publish_discovery()` - Publish Home Assistant auto-discovery message
+  - `check_messages()` - Non-blocking message check
+  - `reconnect()` - Reconnect with exponential backoff
+  - `disconnect()` - Clean disconnect
+- **Features**:
+  - Home Assistant MQTT auto-discovery
+  - QoS 1 for reliable delivery
+  - Retained messages for state and availability
+  - Automatic reconnection (max 10 retries, 60s intervals)
+  - Callback for incoming commands
+
 ## API Reference
 
-Door ESP32 REST API:
+### Door ESP32 REST API
 
 ```
-GET /api/set?on=1&token=SECRET123     # Turn ON
-GET /api/set?on=0&token=SECRET123     # Turn OFF
-GET /api/state                         # Get state: {"on":true,"last_ms":12345}
+# Control Endpoints
+GET /api/set?on=1&token=SECRET123         # Turn ON
+GET /api/set?on=0&token=SECRET123         # Turn OFF
+GET /api/state                             # Get state: {"on":true,"last_ms":12345,"mqtt_status":"connected","mqtt_enabled":true}
+
+# Configuration Endpoints
+GET /config?token=SECRET123                # Serve configuration web UI
+POST /api/config?token=SECRET123           # Save configuration (JSON body) and reboot
+POST /api/config/reset?token=SECRET123     # Reset to factory defaults and reboot
+
+# Web UI
+GET /                                      # Main page with ON/OFF controls and MQTT status
+```
+
+### MQTT Topics
+
+Topic structure (default prefix: `pushbuttondnd`):
+
+```
+# State Publishing
+pushbuttondnd/state                        # Payload: "ON" or "OFF" (retained, QoS 1)
+pushbuttondnd/availability                 # Payload: "online" or "offline" (LWT, retained)
+
+# Command Subscription
+pushbuttondnd/set                          # Payload: "ON" or "OFF" (QoS 1)
+
+# Home Assistant Discovery
+homeassistant/light/pushbuttondnd/config  # Auto-discovery configuration (retained, QoS 1)
+```
+
+### Configuration Schema
+
+`/config.json` structure:
+
+```json
+{
+  "version": 1,
+  "wifi": {"ssid": "...", "password": "..."},
+  "security": {"auth_token": "..."},
+  "mqtt": {
+    "enabled": false,
+    "broker": "homeassistant.local",
+    "port": 1883,
+    "username": "",
+    "password": "",
+    "topic_prefix": "pushbuttondnd",
+    "device_name": "DND Light",
+    "qos": 1
+  },
+  "teams": {
+    "enabled": false,
+    "client_id": "",
+    "tenant_id": "",
+    "client_secret": "",
+    "polling_interval": 300
+  },
+  "features": {
+    "enable_mqtt": false,
+    "enable_teams": false
+  }
+}
 ```
 
 ## 3D Printing Components
@@ -102,17 +194,78 @@ GET /api/state                         # Get state: {"on":true,"last_ms":12345}
 ## Development Notes
 
 ### Testing Changes
-- Monitor REPL output for debugging (IP addresses, connection status, errors)
+- Monitor REPL output for debugging (IP addresses, connection status, errors, MQTT messages)
 - Test web UI at `http://<door-ip>/` after uploading changes
+- Verify configuration UI at `http://<door-ip>/config?token=SECRET123`
 - Verify API endpoints with direct HTTP requests before testing desk unit
 - Check switch state changes in desk unit REPL logs
+- Test MQTT with: `mosquitto_pub -h localhost -t 'pushbuttondnd/set' -m 'ON'`
+
+### Configuration Workflow
+1. **Initial Setup**: Device boots with hardcoded defaults from `config.get_default_config()`
+2. **First Configuration**: Navigate to `/config`, modify settings, click "Save & Reboot"
+3. **Subsequent Boots**: Device loads `/config.json`, falls back to defaults if corrupted
+4. **Testing**: Make changes via web UI, verify they persist across reboots
+5. **Reset**: Use "Reset to Defaults" button or call `config.factory_reset()` via REPL
+
+### MQTT Development
+- **Testing locally**: Install Mosquitto on dev machine
+- **Monitor all topics**: `mosquitto_sub -h localhost -t '#' -v`
+- **Test commands**: `mosquitto_pub -h localhost -t 'pushbuttondnd/set' -m 'ON'`
+- **Check discovery**: `mosquitto_sub -h localhost -t 'homeassistant/#'`
+- **Debug connection**: Check REPL for `[MQTT] Connected` or error messages
+- **Memory monitoring**: Call `import gc; gc.mem_free()` in REPL
 
 ### Common Modifications
 - **Change relay logic**: Modify `set_output()` in door.py and inversion in desk.py
 - **Adjust polling rate**: Modify `setInterval(pollState, 1000)` in HTML for UI refresh
-- **Disable authentication**: Set `AUTH_TOKEN = ""` in door.py
+- **Disable authentication**: Set `auth_token = ""` in web UI or config.json
 - **Change pins**: Update `led_pin = Pin(2, Pin.OUT)` or `switch_pin = Pin(15, Pin.IN, Pin.PULL_UP)`
+- **Add config field**: Update `get_default_config()` in config.py, add to web UI form, update validation
+- **Change MQTT topics**: Modify `topic_prefix` in configuration
+- **Add new endpoint**: Follow pattern in server loop, add auth check, handle request
+
+### Troubleshooting Development Issues
+
+**Config not loading**:
+- Check REPL for "[CONFIG] No config file found" or JSON parse errors
+- Verify `/config.json` exists: `import os; os.listdir('/')`
+- Read raw file: `open('/config.json', 'r').read()`
+
+**MQTT not connecting**:
+- Check `umqtt.simple` library is available: `import umqtt.simple`
+- Verify broker is reachable from ESP32 network
+- Check REPL for "[MQTT] Connected" or error messages
+- Test with minimal script outside main code
+
+**Web UI changes not appearing**:
+- Browser cache issue: Hard refresh (Ctrl+F5)
+- Verify file was uploaded correctly
+- Check for Python syntax errors in REPL
+
+**Device won't reboot after config save**:
+- Check for exception in REPL logs
+- Verify `import machine; machine.reset()` works in REPL
+- May need to manually reboot via power cycle
+
+### File Structure
+
+```
+/                           # ESP32 flash root
+├── main.py                 # door.py uploaded as main.py
+├── config.py               # Configuration management
+├── mqtt_client.py          # MQTT client wrapper
+├── config.json             # Active configuration (created after first save)
+├── config.json.backup      # Backup of previous config
+└── config.json.tmp         # Temporary file during atomic write
+```
 
 ### Known TODO Items
 - Physical button override indicator when desk toggle is used
-- Live JS polling status ring - COMPLETED 12/3/25
+
+### Completed Features
+- Live JS polling status ring (12/3/25)
+- Web-based configuration UI with persistent storage (12/9/25)
+- MQTT integration with Home Assistant auto-discovery (12/9/25)
+- Real-time MQTT connection status indicator (12/9/25)
+- Teams integration UI placeholder (12/9/25)

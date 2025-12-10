@@ -42,6 +42,131 @@
 
 > API's can be fun, ya'll
 
+## Configuration
+
+### Web-Based Configuration UI
+
+Navigate to `http://<door-ip>/config?token=SECRET123` (replace with your AUTH_TOKEN) to access the configuration interface.
+
+**Available Settings**:
+
+1. **WiFi Tab**:
+   - SSID: WiFi network name
+   - Password: WiFi password
+   - Changes require device reboot
+
+2. **Security Tab**:
+   - AUTH_TOKEN: Required for /api/set and /config endpoints
+   - Leave blank to disable authentication
+
+3. **MQTT Tab**:
+   - Enable MQTT Integration checkbox
+   - Broker Host: IP or hostname of MQTT broker (e.g., `homeassistant.local`)
+   - Port: Default 1883 (unencrypted) or 8883 (TLS)
+   - Username/Password: Optional credentials
+   - Topic Prefix: Base topic name (default: `pushbuttondnd`)
+   - Device Name: Friendly name shown in Home Assistant
+
+4. **Teams Tab** (Coming Soon):
+   - Placeholder for future Microsoft Teams integration
+   - Currently disabled
+
+**Saving Configuration**:
+- Click "Save & Reboot" to save changes
+- Device will reboot automatically in 3 seconds
+- Configuration persists across reboots in `/config.json`
+
+**Reset to Defaults**:
+- Click "Reset to Defaults" to restore factory settings
+- Deletes `/config.json` and reboots with hardcoded defaults
+
+**Fallback Behavior**:
+- If config file is corrupted or missing, device uses hardcoded defaults
+- Hardcoded values in code serve as backup configuration
+
+## MQTT Integration
+
+### Prerequisites
+
+- MQTT broker running on your network (e.g., Mosquitto)
+- For Home Assistant: MQTT integration enabled
+
+### Setup with Home Assistant
+
+1. **Enable MQTT in Door ESP32**:
+   - Navigate to `http://<door-ip>/config`
+   - Go to MQTT tab
+   - Check "Enable MQTT Integration"
+   - Enter your broker details:
+     - Broker: `homeassistant.local` (or broker IP)
+     - Port: `1883`
+     - Username/Password: (if required by broker)
+   - Click "Save & Reboot"
+
+2. **Auto-Discovery**:
+   - Device automatically publishes Home Assistant discovery message
+   - In Home Assistant, check Settings → Devices & Services → MQTT
+   - "DND Light" should appear automatically
+   - Entity ID: `light.dnd_light`
+
+3. **Control from Home Assistant**:
+   - Use the light entity in automations, scripts, dashboards
+   - State syncs bidirectionally (web UI ↔ MQTT ↔ Home Assistant)
+
+### MQTT Topics
+
+The device uses the following topic structure (prefix: `pushbuttondnd`):
+
+- **State Topic**: `pushbuttondnd/state`
+  - Payload: `ON` or `OFF`
+  - Published when light state changes
+  - Retained: Yes
+
+- **Command Topic**: `pushbuttondnd/set`
+  - Payload: `ON` or `OFF`
+  - Subscribe to control light remotely
+  - QoS: 1
+
+- **Availability Topic**: `pushbuttondnd/availability`
+  - Payload: `online` or `offline`
+  - Last Will and Testament (LWT)
+  - Indicates device connectivity
+
+- **Discovery Topic**: `homeassistant/light/pushbuttondnd/config`
+  - Published once on connection
+  - Contains Home Assistant auto-discovery configuration
+
+### MQTT Status Indicator
+
+The web UI shows MQTT connection status in the top-right corner:
+- **Green "MQTT: Connected"**: Successfully connected to broker
+- **Red "MQTT: Disconnected"**: Connection lost, attempting reconnection
+- **Grey "MQTT: Disabled"**: MQTT not enabled in configuration
+
+### Troubleshooting MQTT
+
+**Connection Failed**:
+- Verify broker is running: `mosquitto -v` or check Home Assistant logs
+- Check broker hostname/IP is correct and reachable
+- Ensure port 1883 is not blocked by firewall
+- Test with MQTT client: `mosquitto_sub -h homeassistant.local -t '#'`
+
+**Auto-Discovery Not Working**:
+- Verify Home Assistant MQTT integration is enabled
+- Check MQTT integration settings show the device
+- Look for discovery message: `mosquitto_sub -h localhost -t 'homeassistant/#'`
+- Try restarting Home Assistant MQTT integration
+
+**Commands Not Working**:
+- Check device is subscribed: Look for "[MQTT] Subscribed to pushbuttondnd/set" in REPL
+- Test command: `mosquitto_pub -h localhost -t 'pushbuttondnd/set' -m 'ON'`
+- Verify QoS settings match
+
+**Reconnection Loop**:
+- Device attempts reconnection every 60 seconds with exponential backoff
+- After 10 failed attempts, stops trying (reboot device to retry)
+- Check broker logs for connection errors
+
 ## Wiring (summary)
 ### Desk unit (transmitter)
 - **ESP32 GPIO 15** → one side of toggle switch
@@ -109,6 +234,50 @@
 - Check `/api/state` endpoint directly for actual state
 - Verify desk toggle changes are reaching door unit (check REPL logs)
 
+### Factory Reset / Restore Defaults
+
+**Method 1: Via Web UI** (Recommended)
+1. Navigate to `http://<door-ip>/config?token=SECRET123`
+2. Click "Reset to Defaults" button at bottom of page
+3. Confirm the reset
+4. Device deletes `/config.json` and reboots with hardcoded defaults
+
+**Method 2: Via Thonny REPL** (If web UI is inaccessible)
+1. Connect to ESP32 via USB using Thonny IDE
+2. Open REPL (bottom panel)
+3. Run the following commands:
+   ```python
+   import config
+   config.factory_reset()
+   ```
+4. Device will delete `/config.json` and reboot automatically
+
+**Method 3: Manual File Deletion** (Advanced)
+1. Connect via Thonny REPL
+2. Delete config file manually:
+   ```python
+   import os
+   os.remove('/config.json')
+   ```
+3. Reboot device:
+   ```python
+   import machine
+   machine.reset()
+   ```
+
+**After Factory Reset**:
+- Device boots with hardcoded defaults from code
+- WiFi credentials: `SSID = "***REMOVED***"`, `PASSWORD = "***REMOVED***"`
+- Auth token: `SECRET123`
+- MQTT: Disabled
+- All settings can be reconfigured via web UI
+
+**Restore from Backup**:
+If you accidentally reset and want to restore previous settings:
+1. Via REPL: `import config; config.restore_backup()`
+2. This restores from `/config.json.backup` (if it exists)
+3. Device will use the backed-up configuration
+
 ## mDNS Setup (Optional)
 To use `esp-doorlight.local` instead of IP addresses, add this to `door.py` after WiFi connection:
 
@@ -121,6 +290,69 @@ wlan.config(dhcp_hostname="esp-doorlight")
 
 Note: mDNS support varies by MicroPython version and network environment.
 
+## Future: Microsoft Teams Integration
+
+The configuration UI includes placeholders for Microsoft Teams integration (currently disabled).
+
+### Planned Functionality
+
+When implemented, this feature will:
+1. Poll Microsoft Graph API for user presence status
+2. Automatically turn ON DND light when status is "In a meeting", "Busy", or "Do not disturb"
+3. Turn OFF light when status returns to "Available"
+4. Bidirectional sync: Manual light control can update Teams status
+
+### Implementation Requirements
+
+**Azure AD App Registration**:
+- Register application in Azure AD portal (https://portal.azure.com)
+- Grant permissions: `Presence.Read`, `Presence.Read.All`, `User.Read`
+- Generate client secret
+- Note Client ID, Tenant ID, and Client Secret
+
+**MicroPython Challenges**:
+- OAuth 2.0 token acquisition and refresh workflow
+- HTTPS requests to Graph API (requires TLS/SSL support)
+- Token caching and expiration handling
+- Limited RAM for TLS connections (~40-60 KB overhead)
+
+**Recommended Approaches**:
+
+1. **Proxy Server Approach** (Recommended):
+   - Deploy intermediate proxy server (Node.js, Python Flask, etc.)
+   - Proxy handles OAuth flow and Graph API calls
+   - ESP32 polls simple HTTP endpoint on proxy
+   - Reduces memory footprint and complexity
+   - Example: Proxy returns `{"status": "busy"}` in JSON
+
+2. **Power Automate / Logic Apps**:
+   - Use Microsoft Power Automate flow
+   - Trigger: Teams presence changes
+   - Action: POST to ESP32 `/api/set` endpoint
+   - No polling needed, event-driven
+   - Requires Power Automate Premium license
+
+3. **Webhook Approach**:
+   - Microsoft Teams webhook sends presence updates
+   - ESP32 receives webhooks via HTTP POST
+   - Requires public IP or VPN for ESP32 accessibility
+
+### Configuration
+
+Teams settings are pre-configured in the web UI but currently disabled:
+- Navigate to Settings → Teams tab
+- Fields are greyed out with "Coming Soon" badge
+- When feature is implemented, simply enable the checkbox
+
+### Development Status
+
+- **UI**: Complete (disabled)
+- **Configuration storage**: Complete
+- **Integration code**: Not implemented
+- **Estimated complexity**: Medium-High
+
+Contributions welcome! See implementation plan in project documentation.
+
 ## TODO
 
 - Add physical button override indicator when the toggle switch on the desk side is used
@@ -128,3 +360,7 @@ Note: mDNS support varies by MicroPython version and network environment.
 ## Completed Features
 
 - Live JS polling status ring (12/3/25)
+- Web-based configuration UI with persistent storage (12/9/25)
+- MQTT integration with Home Assistant auto-discovery (12/9/25)
+- Real-time MQTT connection status indicator (12/9/25)
+- Teams integration UI placeholder (12/9/25)
