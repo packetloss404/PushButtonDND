@@ -21,14 +21,38 @@ led_pin = Pin(2, Pin.OUT)
 is_on = False
 last_change = time.ticks_ms()
 
-# Wi-Fi setup
+# Event log - in-memory ring buffer of last 20 events
+event_log = []
+MAX_LOG_SIZE = 20
+
+def log_event(event_type, detail):
+    """Add event to ring buffer. Types: state, wifi, mqtt"""
+    entry = {
+        "ts": time.ticks_ms(),
+        "type": event_type,
+        "detail": detail
+    }
+    event_log.append(entry)
+    if len(event_log) > MAX_LOG_SIZE:
+        event_log.pop(0)
+    print(f"[LOG] {event_type}: {detail}")
+
+# Wi-Fi setup with 30-second timeout
+WIFI_TIMEOUT_MS = 30000
 wlan = network.WLAN(network.STA_IF)
 wlan.active(True)
 wlan.connect(SSID, PASSWORD)
 print("Connecting to Wi-Fi...")
+wifi_start = time.ticks_ms()
 while not wlan.isconnected():
+    if time.ticks_diff(time.ticks_ms(), wifi_start) > WIFI_TIMEOUT_MS:
+        print("[WIFI] Connection timeout after 30s, continuing without WiFi")
+        break
     time.sleep(0.5)
-print("Connected:", wlan.ifconfig())
+if wlan.isconnected():
+    print("Connected:", wlan.ifconfig())
+else:
+    print("[WIFI] Not connected, will retry in main loop")
 
 # Initialize MQTT if enabled
 mqtt = None
@@ -42,9 +66,9 @@ if cfg['mqtt']['enabled']:
             payload = msg.decode()
             print(f"[MQTT] Received command: {payload}")
             if payload == "ON":
-                set_output(True)
+                set_output(True, "mqtt")
             elif payload == "OFF":
-                set_output(False)
+                set_output(False, "mqtt")
         except Exception as e:
             print(f"[ERROR] MQTT command error: {e}")
 
@@ -56,12 +80,14 @@ if cfg['mqtt']['enabled']:
         mqtt = None
 
 # Helper functions
-def set_output(on):
+def set_output(on, source="unknown"):
     global is_on, last_change
     is_on = on
     led_pin.value(on)
     last_change = time.ticks_ms()
-    print("Light", "ON" if on else "OFF")
+    state_str = "ON" if on else "OFF"
+    print("Light", state_str)
+    log_event("state", f"{state_str} via {source}")
 
     # Publish to MQTT if enabled and connected
     if mqtt and mqtt.connected:
@@ -240,12 +266,12 @@ def html_page():
 <div id="glow" class="glow-ring">{status}</div>
 
 <button class="action btn-on"
- onclick="location='/api/set?on=1{token_query}'">
+ onclick="location='/api/set?on=1&source=web{token_query}'">
   ON
 </button>
 
 <button class="action btn-off"
- onclick="location='/api/set?on=0{token_query}'">
+ onclick="location='/api/set?on=0&source=web{token_query}'">
   OFF
 </button>
 
@@ -884,6 +910,11 @@ def extract_post_body(request_str):
 def forbidden(s):
     s.send("HTTP/1.1 403 Forbidden\r\n\r\nForbidden")
 
+# Initialize hardware watchdog timer (8 second timeout)
+from machine import WDT
+wdt = WDT(timeout=8000)
+print("[WDT] Watchdog timer initialized (8s timeout)")
+
 # Start web server
 addr = socket.getaddrinfo("0.0.0.0", 80)[0][-1]
 s = socket.socket()
@@ -891,13 +922,23 @@ s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # Allow address reuse
 s.bind(addr)
 s.listen(1)
 s.settimeout(1.0)  # 1 second timeout for non-blocking operation
-print("Web server running on:", wlan.ifconfig()[0])
+if wlan.isconnected():
+    print("Web server running on:", wlan.ifconfig()[0])
+    log_event("wifi", f"Connected: {wlan.ifconfig()[0]}")
+else:
+    print("Web server running (WiFi not yet connected)")
+    log_event("wifi", "Started without WiFi connection")
+if mqtt and mqtt.connected:
+    log_event("mqtt", "Connected to broker")
 
-# MQTT tracking variables
+# WiFi and MQTT tracking variables
+wifi_connected = wlan.isconnected()
+last_wifi_check = time.ticks_ms()
+WIFI_CHECK_INTERVAL = 10000
 last_mqtt_check = time.ticks_ms()
-last_mqtt_reconnect = time.ticks_ms()
 
 while True:
+    wdt.feed()
     try:
         cl, addr = s.accept()
         req = cl.recv(1024).decode()
@@ -906,18 +947,42 @@ while True:
             continue
         path = req.split(" ")[1]
     except OSError:
-        # Socket timeout - check MQTT messages
-        if mqtt and time.ticks_diff(time.ticks_ms(), last_mqtt_check) > 1000:
-            last_mqtt_check = time.ticks_ms()
+        # Socket timeout - check WiFi and MQTT
+        now = time.ticks_ms()
+
+        # Check WiFi status periodically
+        if time.ticks_diff(now, last_wifi_check) > WIFI_CHECK_INTERVAL:
+            last_wifi_check = now
+            was_connected = wifi_connected
+            wifi_connected = wlan.isconnected()
+
+            if was_connected and not wifi_connected:
+                log_event("wifi", "Disconnected")
+                print("[WIFI] Connection lost")
+
+            if not wifi_connected:
+                print("[WIFI] Attempting reconnection...")
+                wlan.connect(SSID, PASSWORD)
+
+            if not was_connected and wifi_connected:
+                log_event("wifi", f"Reconnected: {wlan.ifconfig()[0]}")
+                print("[WIFI] Reconnected:", wlan.ifconfig())
+                # Reset MQTT retries so it tries again after WiFi recovery
+                if mqtt and mqtt._gave_up:
+                    mqtt.reset_retries()
+
+        # MQTT handling (only when WiFi is connected)
+        if wifi_connected and mqtt and time.ticks_diff(now, last_mqtt_check) > 1000:
+            last_mqtt_check = now
 
             if mqtt.connected:
                 mqtt.check_messages()
             else:
-                # Attempt reconnection every 60 seconds
-                if time.ticks_diff(time.ticks_ms(), last_mqtt_reconnect) > 60000:
-                    last_mqtt_reconnect = time.ticks_ms()
-                    print("[MQTT] Attempting reconnection...")
-                    mqtt.reconnect()
+                result = mqtt.reconnect_nonblocking()
+                if result == "connected":
+                    log_event("mqtt", "Reconnected to broker")
+                elif result == "gave_up":
+                    log_event("mqtt", "Gave up reconnecting (max retries)")
 
         continue
 
@@ -932,7 +997,8 @@ while True:
         if AUTH_TOKEN and args.get("token") != AUTH_TOKEN:
             forbidden(cl)
         else:
-            set_output(args.get("on") in ["1", "true"])
+            source = args.get("source", "api")
+            set_output(args.get("on") in ["1", "true"], source)
             cl.send("HTTP/1.1 200 OK\r\n\r\nOK")
         cl.close()
         continue
@@ -942,6 +1008,12 @@ while True:
         mqtt_enabled = "true" if MQTT_ENABLED else "false"
         cl.send("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n" +
                 f'{{"on":{str(is_on).lower()},"last_ms":{time.ticks_ms()-last_change},"mqtt_status":"{mqtt_status}","mqtt_enabled":{mqtt_enabled}}}')
+        cl.close()
+        continue
+
+    if path.startswith("/api/log"):
+        log_json = json.dumps(event_log)
+        cl.send("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n" + log_json)
         cl.close()
         continue
 
@@ -979,6 +1051,7 @@ while True:
             cl.close()
 
             # Reboot after 3 seconds
+            wdt.feed()
             time.sleep(3)
             machine.reset()
         except Exception as e:
@@ -1028,6 +1101,7 @@ while True:
 
             # Reboot device after 3 seconds
             print("[CONFIG] Configuration saved, rebooting in 3 seconds...")
+            wdt.feed()
             time.sleep(3)
             import machine
             machine.reset()

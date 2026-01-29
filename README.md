@@ -3,8 +3,10 @@
 **Profile**: Single-channel relay, **light normally OFF**, **active-HIGH** relay input.
 
 ## What's inside
-- `desk.py` — Desk ESP32. Reads a toggle (GPIO 15, to GND) and sends HTTP to the door ESP32.
+- `desk.py` — Desk ESP32. Reads a toggle (GPIO 15, to GND) and sends HTTP to the door ESP32. On first boot, creates an AP (`DND-Desk-Setup`) for WiFi/config setup.
 - `door.py` — Door ESP32. Hosts a tiny web UI and REST API and drives the relay on GPIO 2 (active HIGH).
+- `config.py` — Configuration management module. Loads/saves `/config.json`, validates settings, handles factory reset and backup.
+- `mqtt_client.py` — MQTT client wrapper. Handles Home Assistant auto-discovery, state publishing, command subscription, and reconnection.
 - `wiring-diagram.svg` — A simple wiring diagram covering both boards and the AC relay wiring.
 - `/door_unit_3D/` — Folder that stores the 3D Printing files for the door unit with bulb
 - `/door_unit_3D/DND_E26_DrillTemplate.dxf` — DXF template for wall mounting holes (export from .scad)
@@ -25,10 +27,10 @@
 3. In Thonny: Interpreter → **MicroPython (ESP32)** → select port → open REPL.
 
 ## Configure & Upload
-1. Open `door.py` and set: `SSID`, `PASSWORD`, `AUTH_TOKEN` (optional). GPIO 2 is used for the relay.
-2. Upload `door.py` to the **door ESP32** as `main.py`. Reboot → note its IP in the REPL logs.
-3. Open `desk.py` and set: `SSID`, `PASSWORD`, `RECEIVER_URL` to the door IP (or use mDNS `http://esp-doorlight.local/api/set`), and `TOKEN` to match `AUTH_TOKEN`.
-4. Upload `desk.py` to the **desk ESP32** as `main.py`. Reboot.
+1. Upload `door.py`, `config.py`, and `mqtt_client.py` to the **door ESP32** (rename `door.py` to `main.py`). Default credentials are configured in `config.py` via `get_default_config()` and can be changed via the web configuration UI at `/config`. Reboot → note its IP in the REPL logs.
+2. Upload `desk.py` and `config.py` to the **desk ESP32** (rename `desk.py` to `main.py`).
+3. On first boot, the desk unit creates a WiFi AP named `DND-Desk-Setup`. Connect to it and navigate to `http://192.168.4.1` to configure WiFi credentials, door unit URL, and auth token.
+4. After saving, the desk unit reboots and connects to your WiFi network. Subsequent boots skip setup.
 
 ## Use
 - Visit `http://<door-ip>/` for the Web UI.
@@ -38,7 +40,8 @@
 - API:
   - `GET /api/set?on=1&token=SECRET123` — Turn ON
   - `GET /api/set?on=0&token=SECRET123` — Turn OFF
-  - `GET /api/state` — Read current state (JSON: `{"on":true,"last_ms":12345}`)
+  - `GET /api/state` — Read current state (JSON: `{"on":true,"last_ms":12345,"mqtt_status":"connected","mqtt_enabled":true}`)
+  - `GET /api/log` — Event log (JSON array of last 20 events with timestamps, types, and details)
 
 > API's can be fun, ya'll
 
@@ -364,3 +367,9 @@ Contributions welcome! See implementation plan in project documentation.
 - MQTT integration with Home Assistant auto-discovery (12/9/25)
 - Real-time MQTT connection status indicator (12/9/25)
 - Teams integration UI placeholder (12/9/25)
+- WiFi reconnection with 30-second boot timeout and automatic recovery (1/28/26)
+- Hardware watchdog timer on both units (8-second timeout) (1/28/26)
+- Non-blocking MQTT reconnection with exponential backoff (1/28/26)
+- Desk unit AP mode setup (`DND-Desk-Setup`) for first-boot configuration (1/28/26)
+- Desk unit config persistence via `config.py` (no more hardcoded credentials) (1/28/26)
+- Event log: in-memory ring buffer of last 20 events via `/api/log` endpoint (1/28/26)

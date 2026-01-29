@@ -42,6 +42,10 @@ def get_default_config():
         "features": {
             "enable_mqtt": False,
             "enable_teams": False
+        },
+        "desk": {
+            "receiver_url": "http://esp-doorlight.local/api/set",
+            "source_tag": "desk"
         }
     }
 
@@ -201,6 +205,15 @@ def validate_config(config_dict):
                     return (False, "teams.polling_interval must be positive")
             except (ValueError, TypeError):
                 return (False, "teams.polling_interval must be an integer")
+
+        # Validate desk section (optional, only present on desk units)
+        if 'desk' in config_dict:
+            desk = config_dict['desk']
+            if 'receiver_url' in desk:
+                if not isinstance(desk['receiver_url'], str):
+                    return (False, "desk.receiver_url must be a string")
+                if desk['receiver_url'] and not desk['receiver_url'].startswith("http"):
+                    return (False, "desk.receiver_url must start with http")
 
         return (True, None)
 

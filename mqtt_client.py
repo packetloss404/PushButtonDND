@@ -36,6 +36,10 @@ class MQTTClient:
         self.retry_delays = [5, 10, 30, 60, 60, 60, 60, 60, 60, 60]  # Exponential backoff
         self.message_callback = None
         self.client_id = f"pushbuttondnd_{unique_id()}"
+        # Non-blocking reconnect state
+        self._reconnect_pending = False
+        self._reconnect_after = 0  # ticks_ms when next attempt is allowed
+        self._gave_up = False
 
     def connect(self):
         """
@@ -186,7 +190,7 @@ class MQTTClient:
 
     def reconnect(self):
         """
-        Attempt to reconnect to MQTT broker with exponential backoff
+        Blocking reconnect with exponential backoff (legacy).
         Returns: True if reconnected, False otherwise
         """
         if self.retry_count >= self.max_retries:
@@ -200,6 +204,52 @@ class MQTTClient:
         self.retry_count += 1
 
         return self.connect()
+
+    def reconnect_nonblocking(self):
+        """
+        Non-blocking reconnect attempt. Call every main loop iteration.
+        Returns: "waiting" | "connected" | "gave_up"
+        """
+        if self.connected:
+            return "connected"
+
+        if self._gave_up:
+            return "gave_up"
+
+        now = time.ticks_ms()
+
+        if not self._reconnect_pending:
+            # Schedule next reconnection attempt
+            delay = self.retry_delays[min(self.retry_count, len(self.retry_delays) - 1)]
+            self._reconnect_after = time.ticks_add(now, delay * 1000)
+            self._reconnect_pending = True
+            print(f"[MQTT] Will reconnect in {delay}s (attempt {self.retry_count + 1}/{self.max_retries})")
+            return "waiting"
+
+        # Check if it's time to attempt
+        if time.ticks_diff(now, self._reconnect_after) < 0:
+            return "waiting"
+
+        # Time to attempt connection
+        self._reconnect_pending = False
+        self.retry_count += 1
+
+        if self.retry_count > self.max_retries:
+            print(f"[MQTT] Max retries ({self.max_retries}) reached, giving up")
+            self._gave_up = True
+            return "gave_up"
+
+        print("[MQTT] Attempting reconnection...")
+        if self.connect():
+            return "connected"
+        return "waiting"
+
+    def reset_retries(self):
+        """Reset retry state to allow reconnection after giving up"""
+        self.retry_count = 0
+        self._reconnect_pending = False
+        self._gave_up = False
+        print("[MQTT] Retry counter reset")
 
     def disconnect(self):
         """
