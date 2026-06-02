@@ -12,15 +12,20 @@ except ImportError:
 
 
 def get_default_config():
-    """Return default configuration dictionary"""
+    """Return default configuration dictionary.
+
+    NOTE: wifi/security values are intentionally blank. Real credentials are
+    entered through the on-device AP setup page (see desk.py) and persisted to
+    /config.json, which is NOT committed to source control.
+    """
     return {
         "version": 1,
         "wifi": {
-            "ssid": "***REMOVED***",
-            "password": "***REMOVED***"
+            "ssid": "",
+            "password": ""
         },
         "security": {
-            "auth_token": "SECRET123"
+            "auth_token": ""
         },
         "mqtt": {
             "enabled": False,
