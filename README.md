@@ -12,7 +12,7 @@
 - `/door_unit_3D/DND_E26_DrillTemplate.dxf` — DXF template for wall mounting holes (export from .scad)
 - `/door_unit_3D/DND_E26_WallMount.scad` — OpenSCAD parametric model for E26 socket wall mount
 - `/door_unit_3D/README.md` — specific info for printing included
-- `/desk_unit_3D/` — Folder that stores the 3D Printing files for the desk unit with switch
+- `/desk_unit_3D/` — Planned folder for the desk-unit-with-switch 3D printing files (not yet in repo)
 - This README.
 
 > Still building out the 3D models and final designs

@@ -199,7 +199,7 @@ homeassistant/light/pushbuttondnd/config  # Auto-discovery configuration (retain
 - **Drill template**: Uncomment drill template section in .scad, export as DXF
 
 ### Desk Unit
-- Files in `desk_unit_3D/` (3D models still in development)
+- Files planned for `desk_unit_3D/` (3D models still in development, not yet in repo)
 
 ## Safety Requirements
 
