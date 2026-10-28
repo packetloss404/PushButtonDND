@@ -5,98 +5,141 @@ import time
 import config
 import json
 import mqtt_client
+from http_utils import read_request, send_response, parse_query, html_escape, url_encode, HTTPError
 
-# Load configuration
-cfg, err = config.load_config()
-if err:
-    print(f"Config error: {err}, using defaults")
-
-SSID = cfg['wifi']['ssid']
-PASSWORD = cfg['wifi']['password']
-AUTH_TOKEN = cfg['security']['auth_token']
-MQTT_ENABLED = cfg['mqtt']['enabled']
+# Importing this module never starts hardware or a server. run() owns boot.
+cfg = config.get_default_config()
+SSID = ""
+PASSWORD = ""
+AUTH_TOKEN = ""
+MQTT_ENABLED = False
 MQTT_CONFIG = cfg['mqtt']
-
-led_pin = Pin(2, Pin.OUT)
+led_pin = None
 is_on = False
-last_change = time.ticks_ms()
-
-# Event log - in-memory ring buffer of last 20 events
+last_change = 0
 event_log = []
 MAX_LOG_SIZE = 20
+mqtt = None
+wlan = None
+ap = None
+wdt = None
+wifi_connected = False
+last_wifi_check = 0
+last_mqtt_check = 0
+WIFI_CHECK_INTERVAL = 10000
+WIFI_TIMEOUT_MS = 30000
+
 
 def log_event(event_type, detail):
-    """Add event to ring buffer. Types: state, wifi, mqtt"""
-    entry = {
-        "ts": time.ticks_ms(),
-        "type": event_type,
-        "detail": detail
-    }
-    event_log.append(entry)
+    """Store the most recent 20 state, WiFi and MQTT events."""
+    event_log.append({"ts": time.ticks_ms(), "type": event_type, "detail": detail})
     if len(event_log) > MAX_LOG_SIZE:
         event_log.pop(0)
-    print(f"[LOG] {event_type}: {detail}")
+    print("[LOG] {}: {}".format(event_type, detail))
 
-# Wi-Fi setup with 30-second timeout
-WIFI_TIMEOUT_MS = 30000
-wlan = network.WLAN(network.STA_IF)
-wlan.active(True)
-wlan.connect(SSID, PASSWORD)
-print("Connecting to Wi-Fi...")
-wifi_start = time.ticks_ms()
-while not wlan.isconnected():
-    if time.ticks_diff(time.ticks_ms(), wifi_start) > WIFI_TIMEOUT_MS:
-        print("[WIFI] Connection timeout after 30s, continuing without WiFi")
-        break
-    time.sleep(0.5)
-if wlan.isconnected():
-    print("Connected:", wlan.ifconfig())
-else:
-    print("[WIFI] Not connected, will retry in main loop")
 
-# Initialize MQTT if enabled
-mqtt = None
-if cfg['mqtt']['enabled']:
-    print("[MQTT] Initializing...")
-    mqtt = mqtt_client.MQTTClient(cfg['mqtt'])
+def mqtt_command_handler(topic, msg):
+    payload = msg.decode() if isinstance(msg, bytes) else msg
+    if payload == "ON":
+        set_output(True, "mqtt")
+    elif payload == "OFF":
+        set_output(False, "mqtt")
 
-    # Set callback for incoming MQTT commands
-    def mqtt_command_handler(topic, msg):
+
+def initialize(configuration=None, connect_wifi=True):
+    """Initialize safe relay state and configuration; optionally connect hardware.
+
+    Tests can pass configuration and connect_wifi=False, then exercise the same
+    handle_client() used by run() with real accepted TCP sockets.
+    """
+    global cfg, SSID, PASSWORD, AUTH_TOKEN, MQTT_ENABLED, MQTT_CONFIG
+    global led_pin, is_on, last_change, mqtt, wlan, ap, wdt
+    global wifi_connected, last_wifi_check, last_mqtt_check, event_log
+    if configuration is None:
+        cfg, error = config.load_config()
+        if error:
+            print("[CONFIG]", error)
+    else:
+        cfg = configuration
+    SSID = cfg['wifi']['ssid']
+    PASSWORD = cfg['wifi']['password']
+    AUTH_TOKEN = cfg['security']['auth_token']
+    MQTT_ENABLED = cfg['mqtt']['enabled']
+    MQTT_CONFIG = cfg['mqtt']
+    led_pin = Pin(2, Pin.OUT, value=0)
+    is_on = False
+    last_change = time.ticks_ms()
+    event_log = []
+    mqtt = None
+    wlan = None
+    ap = None
+    wdt = None
+    wifi_connected = False
+    last_wifi_check = time.ticks_ms()
+    last_mqtt_check = time.ticks_ms()
+    if not connect_wifi:
+        return
+    # Watchdog is active and fed during the bounded boot connection wait.
+    from machine import WDT
+    wdt = WDT(timeout=8000)
+    wlan = network.WLAN(network.STA_IF)
+    wlan.active(True)
+    if SSID:
         try:
-            payload = msg.decode()
-            print(f"[MQTT] Received command: {payload}")
-            if payload == "ON":
-                set_output(True, "mqtt")
-            elif payload == "OFF":
-                set_output(False, "mqtt")
-        except Exception as e:
-            print(f"[ERROR] MQTT command error: {e}")
+            wlan.connect(SSID, PASSWORD)
+        except OSError as error:
+            log_event("wifi", "Connection failed: {}".format(error))
+        started = time.ticks_ms()
+        while not wlan.isconnected() and time.ticks_diff(time.ticks_ms(), started) < WIFI_TIMEOUT_MS:
+            wdt.feed()
+            time.sleep(0.25)
+    else:
+        # Blank or corrupt initial configuration must remain provisionable.
+        ap = network.WLAN(network.AP_IF)
+        ap.active(True)
+        ap.config(essid="DND-Door-Setup", authmode=0)
+        log_event("wifi", "Setup AP: DND-Door-Setup at {}".format(ap.ifconfig()[0]))
+    wifi_connected = wlan.isconnected()
+    log_event("wifi", "Connected: {}".format(wlan.ifconfig()[0]) if wifi_connected else "Station disconnected")
+    if MQTT_ENABLED:
+        wdt.feed()
+        mqtt = mqtt_client.MQTTClient(MQTT_CONFIG)
+        mqtt.message_callback = mqtt_command_handler
+        # Preserve failed clients so background retry can recover.
+        if wifi_connected:
+            wdt.feed()
+            connected = mqtt.connect()
+            wdt.feed()
+            if connected:
+                mqtt.publish_state(is_on)
+                wdt.feed()
+                log_event("mqtt", "Connected to broker")
 
-    mqtt.message_callback = mqtt_command_handler
-
-    # Connect to broker
-    if not mqtt.connect():
-        print("[MQTT] Connection failed, continuing without MQTT")
-        mqtt = None
 
 # Helper functions
 def set_output(on, source="unknown"):
     global is_on, last_change
     is_on = on
-    led_pin.value(on)
+    if led_pin is not None:
+        led_pin.value(on)
     last_change = time.ticks_ms()
     state_str = "ON" if on else "OFF"
     print("Light", state_str)
     log_event("state", f"{state_str} via {source}")
 
-    # Publish to MQTT if enabled and connected
-    if mqtt and mqtt.connected:
+    # Cache state while disconnected; publish immediately while connected.
+    if mqtt:
+        if wdt:
+            wdt.feed()
+        was_connected = mqtt.connected
         mqtt.publish_state(on)
+        if was_connected and not mqtt.connected:
+            log_event('mqtt', 'Disconnected from broker')
 
 def html_page():
     status = "ON" if is_on else "OFF"
     color = "#f44336" if is_on else "#4CAF50"
-    token_query = f"&token={AUTH_TOKEN}" if AUTH_TOKEN else ""
+
 
     return f"""<!doctype html>
 <html>
@@ -265,17 +308,18 @@ def html_page():
 
 <div id="glow" class="glow-ring">{status}</div>
 
-<button class="action btn-on"
- onclick="location='/api/set?on=1&source=web{token_query}'">
+<p><label for="control_token">API token</label>
+<input id="control_token" type="password" autocomplete="off" placeholder="If configured"></p>
+<p id="control_error" role="alert"></p>
+<button class="action btn-on" onclick="setLight(true)">
   ON
 </button>
 
-<button class="action btn-off"
- onclick="location='/api/set?on=0&source=web{token_query}'">
+<button class="action btn-off" onclick="setLight(false)">
   OFF
 </button>
 
-<a href="/config{token_query}" class="btn-settings">
+<a href="/config" onclick="this.href='/config'+tokenQuery()" class="btn-settings">
   Settings
 </a>
 
@@ -285,6 +329,22 @@ function toggleTheme() {{
   let isLight = document.body.classList.contains("light");
   document.getElementById("themeToggle").textContent =
     isLight ? "Light" : "Dark";
+}}
+
+const tokenInput = document.getElementById('control_token');
+tokenInput.value = new URLSearchParams(window.location.search).get('token') || '';
+function tokenQuery() {{
+  return tokenInput.value ? '?token=' + encodeURIComponent(tokenInput.value) : '';
+}}
+async function setLight(on) {{
+  const error = document.getElementById('control_error');
+  error.textContent = '';
+  try {{
+    const response = await fetch('/api/set?on=' + (on ? '1' : '0') + '&source=web' +
+      (tokenInput.value ? '&token=' + encodeURIComponent(tokenInput.value) : ''));
+    if (!response.ok) throw new Error(response.status === 403 ? 'Invalid API token' : 'Control failed');
+    pollState();
+  }} catch (e) {{ error.textContent = e.message; }}
 }}
 
 /* ========== LIVE POLLING ========== */
@@ -325,6 +385,7 @@ function pollState() {{
 }}
 
 // Poll every second
+pollState();
 setInterval(pollState, 1000);
 </script>
 
@@ -335,7 +396,11 @@ setInterval(pollState, 1000);
 def config_page():
     """Generate configuration page with tabbed interface"""
     mqtt_enabled_checked = "checked" if cfg['mqtt']['enabled'] else ""
-    teams_enabled_checked = "checked" if cfg['teams']['enabled'] else ""
+    teams_enabled_checked = ""  # Integration is a disabled placeholder.
+    # Attribute values and script literals require different escaping.
+    values = {section: {key: html_escape(value) for key, value in fields.items()}
+              for section, fields in cfg.items() if isinstance(fields, dict)}
+    auth_json = json.dumps(AUTH_TOKEN).replace("<", "\\u003c")
 
     return f"""<!doctype html>
 <html>
@@ -597,25 +662,25 @@ def config_page():
 
   <!-- Tab Navigation -->
   <div class="tabs">
-    <button class="tab active" onclick="switchTab('wifi')">WiFi</button>
-    <button class="tab" onclick="switchTab('security')">Security</button>
-    <button class="tab" onclick="switchTab('mqtt')">MQTT</button>
-    <button class="tab" onclick="switchTab('teams')">Teams</button>
+    <button class="tab active" onclick="switchTab('wifi', this)">WiFi</button>
+    <button class="tab" onclick="switchTab('security', this)">Security</button>
+    <button class="tab" onclick="switchTab('mqtt', this)">MQTT</button>
+    <button class="tab" onclick="switchTab('teams', this)">Teams</button>
   </div>
 
   <!-- WiFi Tab -->
   <div id="wifi" class="tab-content active">
     <div class="form-group">
       <label for="ssid">WiFi Network (SSID)</label>
-      <input type="text" id="ssid" value="{cfg['wifi']['ssid']}" placeholder="Your WiFi network name">
+      <input type="text" id="ssid" value="{values['wifi']['ssid']}" placeholder="Your WiFi network name">
       <small>Network name (case-sensitive)</small>
     </div>
 
     <div class="form-group">
       <label for="wifi_password">WiFi Password</label>
       <div class="password-field">
-        <input type="password" id="wifi_password" value="{cfg['wifi']['password']}" placeholder="WiFi password">
-        <button class="toggle-password" onclick="togglePassword('wifi_password')">Show</button>
+        <input type="password" id="wifi_password" value="{values['wifi']['password']}" placeholder="WiFi password">
+        <button class="toggle-password" onclick="togglePassword('wifi_password', this)">Show</button>
       </div>
       <small>Required for WPA/WPA2 networks</small>
     </div>
@@ -625,7 +690,7 @@ def config_page():
   <div id="security" class="tab-content">
     <div class="form-group">
       <label for="auth_token">API Authentication Token</label>
-      <input type="text" id="auth_token" value="{cfg['security']['auth_token']}" placeholder="Leave blank to disable">
+      <input type="text" id="auth_token" value="{values['security']['auth_token']}" placeholder="Leave blank to disable">
       <small>Required for /api/set and /config endpoints. Leave blank to disable authentication.</small>
     </div>
   </div>
@@ -642,39 +707,39 @@ def config_page():
 
     <div class="form-group">
       <label for="mqtt_broker">MQTT Broker Host</label>
-      <input type="text" id="mqtt_broker" value="{cfg['mqtt']['broker']}" placeholder="homeassistant.local or IP">
+      <input type="text" id="mqtt_broker" value="{values['mqtt']['broker']}" placeholder="homeassistant.local or IP">
       <small>Hostname or IP address of your MQTT broker</small>
     </div>
 
     <div class="form-group">
       <label for="mqtt_port">MQTT Port</label>
-      <input type="number" id="mqtt_port" value="{cfg['mqtt']['port']}" placeholder="1883">
-      <small>Default: 1883 (unencrypted), 8883 (TLS)</small>
+      <input type="number" id="mqtt_port" value="{values['mqtt']['port']}" placeholder="1883">
+      <small>Default: 1883 (unencrypted). TLS is not supported by this firmware.</small>
     </div>
 
     <div class="form-group">
       <label for="mqtt_username">MQTT Username</label>
-      <input type="text" id="mqtt_username" value="{cfg['mqtt']['username']}" placeholder="Leave blank if not required">
+      <input type="text" id="mqtt_username" value="{values['mqtt']['username']}" placeholder="Leave blank if not required">
       <small>Optional: Leave blank for anonymous access</small>
     </div>
 
     <div class="form-group">
       <label for="mqtt_password">MQTT Password</label>
       <div class="password-field">
-        <input type="password" id="mqtt_password" value="{cfg['mqtt']['password']}" placeholder="Leave blank if not required">
-        <button class="toggle-password" onclick="togglePassword('mqtt_password')">Show</button>
+        <input type="password" id="mqtt_password" value="{values['mqtt']['password']}" placeholder="Leave blank if not required">
+        <button class="toggle-password" onclick="togglePassword('mqtt_password', this)">Show</button>
       </div>
     </div>
 
     <div class="form-group">
       <label for="mqtt_topic_prefix">Topic Prefix</label>
-      <input type="text" id="mqtt_topic_prefix" value="{cfg['mqtt']['topic_prefix']}" placeholder="pushbuttondnd">
+      <input type="text" id="mqtt_topic_prefix" value="{values['mqtt']['topic_prefix']}" placeholder="pushbuttondnd">
       <small>Prefix for MQTT topics (e.g., pushbuttondnd/state)</small>
     </div>
 
     <div class="form-group">
       <label for="mqtt_device_name">Device Name</label>
-      <input type="text" id="mqtt_device_name" value="{cfg['mqtt']['device_name']}" placeholder="DND Light">
+      <input type="text" id="mqtt_device_name" value="{values['mqtt']['device_name']}" placeholder="DND Light">
       <small>Friendly name shown in Home Assistant</small>
     </div>
 
@@ -699,25 +764,25 @@ def config_page():
 
       <div class="form-group">
         <label for="teams_client_id">Azure AD Client ID</label>
-        <input type="text" id="teams_client_id" value="{cfg['teams']['client_id']}" disabled placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
+        <input type="text" id="teams_client_id" value="{values['teams']['client_id']}" disabled placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
       </div>
 
       <div class="form-group">
         <label for="teams_tenant_id">Azure AD Tenant ID</label>
-        <input type="text" id="teams_tenant_id" value="{cfg['teams']['tenant_id']}" disabled placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
+        <input type="text" id="teams_tenant_id" value="{values['teams']['tenant_id']}" disabled placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
       </div>
 
       <div class="form-group">
         <label for="teams_client_secret">Client Secret</label>
         <div class="password-field">
-          <input type="password" id="teams_client_secret" value="{cfg['teams']['client_secret']}" disabled placeholder="Azure AD application secret">
+          <input type="password" id="teams_client_secret" value="{values['teams']['client_secret']}" disabled placeholder="Azure AD application secret">
           <button class="toggle-password" disabled>Show</button>
         </div>
       </div>
 
       <div class="form-group">
         <label for="teams_polling_interval">Polling Interval (seconds)</label>
-        <input type="number" id="teams_polling_interval" value="{cfg['teams']['polling_interval']}" disabled placeholder="300">
+        <input type="number" id="teams_polling_interval" value="{values['teams']['polling_interval']}" disabled placeholder="300">
         <small>How often to check Teams status (default: 300 = 5 minutes)</small>
       </div>
     </div>
@@ -737,7 +802,7 @@ def config_page():
 </div>
 
 <script>
-function switchTab(tabName) {{
+function switchTab(tabName, button) {{
   // Hide all tab contents
   document.querySelectorAll('.tab-content').forEach(el => {{
     el.classList.remove('active');
@@ -752,12 +817,12 @@ function switchTab(tabName) {{
   document.getElementById(tabName).classList.add('active');
 
   // Activate selected tab button
-  event.target.classList.add('active');
+  const selected = button || document.querySelectorAll('.tab')[['wifi','security','mqtt','teams'].indexOf(tabName)];
+  if (selected) selected.classList.add('active');
 }}
 
-function togglePassword(fieldId) {{
+function togglePassword(fieldId, btn) {{
   const field = document.getElementById(fieldId);
-  const btn = event.target;
 
   if (field.type === 'password') {{
     field.type = 'text';
@@ -806,6 +871,10 @@ function saveConfig() {{
       client_secret: document.getElementById('teams_client_secret').value,
       polling_interval: parseInt(document.getElementById('teams_polling_interval').value)
     }},
+    desk: {{
+      receiver_url: {json.dumps(cfg['desk']['receiver_url']).replace('<', chr(92) + 'u003c')},
+      source_tag: {json.dumps(cfg['desk']['source_tag']).replace('<', chr(92) + 'u003c')}
+    }},
     features: {{
       enable_mqtt: document.getElementById('mqtt_enabled').checked,
       enable_teams: false
@@ -826,7 +895,8 @@ function saveConfig() {{
   }}
 
   // Save configuration
-  const tokenParam = '{AUTH_TOKEN}' ? '?token={AUTH_TOKEN}' : '';
+  const currentToken = {auth_json};
+  const tokenParam = currentToken ? '?token=' + encodeURIComponent(currentToken) : '';
 
   fetch('/api/config' + tokenParam, {{
     method: 'POST',
@@ -854,7 +924,8 @@ function resetDefaults() {{
     return;
   }}
 
-  const tokenParam = '{AUTH_TOKEN}' ? '?token={AUTH_TOKEN}' : '';
+  const currentToken = {auth_json};
+  const tokenParam = currentToken ? '?token=' + encodeURIComponent(currentToken) : '';
 
   fetch('/api/config/reset' + tokenParam, {{
     method: 'POST'
@@ -880,243 +951,190 @@ function resetDefaults() {{
 </html>
 """
 
-def check_auth(request_str):
-    """Check if request contains valid auth token"""
+
+
+def check_auth(path, headers=None):
+    """Compare one decoded query token or Authorization header exactly."""
     if not AUTH_TOKEN:
-        return True  # Auth disabled
-
-    # Check query parameter: ?token=SECRET123
-    if f"token={AUTH_TOKEN}" in request_str:
         return True
+    params = parse_query(path)
+    if params.get('token') == AUTH_TOKEN:
+        return True
+    headers = headers or {}
+    authorization = headers.get('authorization', headers.get('Authorization', ''))
+    return authorization == AUTH_TOKEN or authorization == 'Bearer ' + AUTH_TOKEN
 
-    # Check Authorization header (optional)
-    lines = request_str.split('\r\n')
-    for line in lines:
-        if line.startswith('Authorization:'):
-            token = line.split(':', 1)[1].strip()
-            if token == f"Bearer {AUTH_TOKEN}" or token == AUTH_TOKEN:
-                return True
 
-    return False
+def _respond(client, status, body, content_type='text/plain'):
+    if wdt:
+        wdt.feed()
+    send_response(client, status, body, content_type)
 
-def extract_post_body(request_str):
-    """Extract POST body from HTTP request"""
-    # Find the empty line separating headers from body
-    parts = request_str.split('\r\n\r\n', 1)
-    if len(parts) > 1:
-        return parts[1]
-    return ""
 
-def forbidden(s):
-    s.send("HTTP/1.1 403 Forbidden\r\n\r\nForbidden")
+def _json_response(client, status, value):
+    _respond(client, status, json.dumps(value), 'application/json')
 
-# Initialize hardware watchdog timer (8 second timeout)
-from machine import WDT
-wdt = WDT(timeout=8000)
-print("[WDT] Watchdog timer initialized (8s timeout)")
 
-# Start web server
-addr = socket.getaddrinfo("0.0.0.0", 80)[0][-1]
-s = socket.socket()
-s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # Allow address reuse
-s.bind(addr)
-s.listen(1)
-s.settimeout(1.0)  # 1 second timeout for non-blocking operation
-if wlan.isconnected():
-    print("Web server running on:", wlan.ifconfig()[0])
-    log_event("wifi", f"Connected: {wlan.ifconfig()[0]}")
-else:
-    print("Web server running (WiFi not yet connected)")
-    log_event("wifi", "Started without WiFi connection")
-if mqtt and mqtt.connected:
-    log_event("mqtt", "Connected to broker")
+def handle_client(client):
+    """Serve one bounded HTTP request; return True only after saved/reset config.
 
-# WiFi and MQTT tracking variables
-wifi_connected = wlan.isconnected()
-last_wifi_check = time.ticks_ms()
-WIFI_CHECK_INTERVAL = 10000
-last_mqtt_check = time.ticks_ms()
-
-while True:
-    wdt.feed()
+    The caller schedules reboot after the response has been sent and closed.
+    It is intentionally outside this handler so tests can inspect persistence.
+    """
     try:
-        cl, addr = s.accept()
-        req = cl.recv(1024).decode()
-        if not req:
-            cl.close()
-            continue
-        path = req.split(" ")[1]
-    except OSError:
-        # Socket timeout - check WiFi and MQTT
-        now = time.ticks_ms()
-
-        # Check WiFi status periodically
-        if time.ticks_diff(now, last_wifi_check) > WIFI_CHECK_INTERVAL:
-            last_wifi_check = now
-            was_connected = wifi_connected
-            wifi_connected = wlan.isconnected()
-
-            if was_connected and not wifi_connected:
-                log_event("wifi", "Disconnected")
-                print("[WIFI] Connection lost")
-
-            if not wifi_connected:
-                print("[WIFI] Attempting reconnection...")
-                wlan.connect(SSID, PASSWORD)
-
-            if not was_connected and wifi_connected:
-                log_event("wifi", f"Reconnected: {wlan.ifconfig()[0]}")
-                print("[WIFI] Reconnected:", wlan.ifconfig())
-                # Reset MQTT retries so it tries again after WiFi recovery
-                if mqtt and mqtt._gave_up:
-                    mqtt.reset_retries()
-
-        # MQTT handling (only when WiFi is connected)
-        if wifi_connected and mqtt and time.ticks_diff(now, last_mqtt_check) > 1000:
-            last_mqtt_check = now
-
-            if mqtt.connected:
-                mqtt.check_messages()
-            else:
-                result = mqtt.reconnect_nonblocking()
-                if result == "connected":
-                    log_event("mqtt", "Reconnected to broker")
-                elif result == "gave_up":
-                    log_event("mqtt", "Gave up reconnecting (max retries)")
-
-        continue
-
-    # Process HTTP request (path is now available)
-
-    if path.startswith("/api/set"):
-        args = {}
-        for p in path.split("?")[1].split("&"):
-            if "=" in p:
-                k, v = p.split("=")
-                args[k] = v
-        if AUTH_TOKEN and args.get("token") != AUTH_TOKEN:
-            forbidden(cl)
-        else:
-            source = args.get("source", "api")
-            set_output(args.get("on") in ["1", "true"], source)
-            cl.send("HTTP/1.1 200 OK\r\n\r\nOK")
-        cl.close()
-        continue
-
-    if path.startswith("/api/state"):
-        mqtt_status = "connected" if (mqtt and mqtt.connected) else "disconnected"
-        mqtt_enabled = "true" if MQTT_ENABLED else "false"
-        cl.send("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n" +
-                f'{{"on":{str(is_on).lower()},"last_ms":{time.ticks_ms()-last_change},"mqtt_status":"{mqtt_status}","mqtt_enabled":{mqtt_enabled}}}')
-        cl.close()
-        continue
-
-    if path.startswith("/api/log"):
-        log_json = json.dumps(event_log)
-        cl.send("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n" + log_json)
-        cl.close()
-        continue
-
-    # GET /config - Serve configuration page
-    if path.startswith("/config"):
-        if not check_auth(req):
-            forbidden(cl)
-            cl.close()
-            continue
-        cl.send("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n" + config_page())
-        cl.close()
-        continue
-
-    # POST /api/config - Save configuration
-    if req.startswith("POST /api/config/reset"):
-        if not check_auth(req):
-            forbidden(cl)
-            cl.close()
-            continue
-
-        # Reset to defaults
-        try:
-            import machine
-            # Delete config file
-            try:
-                import os
-                os.remove('/config.json')
-                print("[CONFIG] Reset to defaults, config.json deleted")
-            except:
-                print("[CONFIG] No config file to delete")
-
-            # Send success response
-            cl.send("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n" +
-                    json.dumps({"success": True, "message": "Reset to defaults"}))
-            cl.close()
-
-            # Reboot after 3 seconds
+        if wdt:
             wdt.feed()
-            time.sleep(3)
-            machine.reset()
-        except Exception as e:
-            print(f"[ERROR] Reset failed: {e}")
-            cl.send("HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\n\r\n" +
-                    json.dumps({"success": False, "error": str(e)}))
-            cl.close()
-        continue
-
-    if req.startswith("POST /api/config"):
-        if not check_auth(req):
-            forbidden(cl)
-            cl.close()
-            continue
-
-        # Save configuration
-        try:
-            body = extract_post_body(req)
-            if not body:
-                cl.send("HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\n\r\n" +
-                        json.dumps({"success": False, "error": "No request body"}))
-                cl.close()
-                continue
-
-            new_config = json.loads(body)
-
-            # Validate configuration
+        method, target, headers, body = read_request(client)
+        if wdt:
+            wdt.feed()
+        route = target.split('?', 1)[0]
+        methods = {
+            '/': 'GET', '/config': 'GET', '/api/state': 'GET',
+            '/api/log': 'GET', '/api/set': 'GET',
+            '/api/config': 'POST', '/api/config/reset': 'POST'
+        }
+        if route not in methods:
+            _json_response(client, 404, {'error': 'Not found'})
+            return False
+        if method != methods[route]:
+            _json_response(client, 405, {'error': 'Method not allowed'})
+            return False
+        if route in ('/config', '/api/set', '/api/config', '/api/config/reset') and not check_auth(target, headers):
+            _json_response(client, 403, {'error': 'Forbidden'})
+            return False
+        if route == '/':
+            _respond(client, 200, html_page(), 'text/html')
+        elif route == '/config':
+            _respond(client, 200, config_page(), 'text/html')
+        elif route == '/api/state':
+            _json_response(client, 200, {
+                'on': is_on, 'last_ms': max(0, time.ticks_diff(time.ticks_ms(), last_change)),
+                'mqtt_status': 'connected' if mqtt and mqtt.connected else 'disconnected',
+                'mqtt_enabled': MQTT_ENABLED
+            })
+        elif route == '/api/log':
+            _json_response(client, 200, event_log)
+        elif route == '/api/set':
+            params = parse_query(target)
+            if params.get('on') not in ('1', '0', 'true', 'false'):
+                _json_response(client, 400, {'error': 'on must be 1, 0, true or false'})
+                return False
+            source = params.get('source', 'api')[:40]
+            set_output(params['on'] in ('1', 'true'), source)
+            _respond(client, 200, 'OK')
+        elif route == '/api/config/reset':
+            success, error = config.reset_config()
+            _json_response(client, 200 if success else 500,
+                           {'success': success, 'error': error})
+            return success
+        elif route == '/api/config':
+            try:
+                new_config = json.loads(body)
+            except ValueError:
+                _json_response(client, 400, {'success': False, 'error': 'Invalid JSON'})
+                return False
+            if not isinstance(new_config, dict):
+                _json_response(client, 400, {'success': False, 'error': 'Configuration must be an object'})
+                return False
+            # Door settings must not erase desk values maintained through REPL/API.
+            if 'desk' not in new_config:
+                new_config['desk'] = cfg['desk'].copy()
             valid, error = config.validate_config(new_config)
             if not valid:
-                cl.send("HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\n\r\n" +
-                        json.dumps({"success": False, "error": error}))
-                cl.close()
-                continue
-
-            # Save configuration
+                _json_response(client, 400, {'success': False, 'error': error})
+                return False
             success, error = config.save_config(new_config)
-            if not success:
-                cl.send("HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\n\r\n" +
-                        json.dumps({"success": False, "error": error}))
-                cl.close()
+            _json_response(client, 200 if success else 500,
+                           {'success': success, 'error': error})
+            return success
+        return False
+    except HTTPError as error:
+        try:
+            _json_response(client, error.status, {'success': False, 'error': str(error)})
+        except OSError:
+            pass  # Peer may already have disconnected during request reception.
+        return False
+    except (OSError, ValueError, UnicodeError) as error:
+        # A disconnected/malformed client must not terminate the firmware loop.
+        try:
+            _json_response(client, 400, {'success': False, 'error': 'Invalid request'})
+        except OSError:
+            pass
+        return False
+    finally:
+        try:
+            client.close()
+        except OSError:
+            pass
+
+
+def service_background():
+    """Run on every loop, including iterations serving busy browser traffic."""
+    global wifi_connected, last_wifi_check, last_mqtt_check
+    now = time.ticks_ms()
+    if wdt:
+        wdt.feed()
+    if wlan and time.ticks_diff(now, last_wifi_check) >= WIFI_CHECK_INTERVAL:
+        last_wifi_check = now
+        was_connected = wifi_connected
+        wifi_connected = wlan.isconnected()
+        if was_connected and not wifi_connected:
+            log_event('wifi', 'Disconnected')
+            if mqtt:
+                mqtt.connected = False
+        if not wifi_connected and SSID:
+            try:
+                wlan.connect(SSID, PASSWORD)
+            except OSError as error:
+                log_event('wifi', 'Reconnection failed: {}'.format(error))
+        if not was_connected and wifi_connected:
+            log_event('wifi', 'Reconnected: {}'.format(wlan.ifconfig()[0]))
+            if mqtt:
+                mqtt.reset_retries()
+    if wifi_connected and mqtt and time.ticks_diff(now, last_mqtt_check) >= 100:
+        last_mqtt_check = now
+        if mqtt.connected:
+            mqtt.check_messages()
+            if not mqtt.connected:
+                log_event('mqtt', 'Disconnected from broker')
+        else:
+            already_gave_up = getattr(mqtt, '_gave_up', False)
+            result = mqtt.reconnect_nonblocking()
+            if wdt:
+                wdt.feed()
+            if result == 'connected':
+                mqtt.publish_state(is_on)
+                log_event('mqtt', 'Reconnected to broker')
+            elif result == 'gave_up' and not already_gave_up:
+                log_event('mqtt', 'Gave up reconnecting (max retries)')
+
+
+def run():
+    """ESP32 entry point: initialize hardware and run HTTP/background services."""
+    initialize()
+    server = socket.socket()
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(socket.getaddrinfo('0.0.0.0', 80)[0][-1])
+    server.listen(2)
+    server.settimeout(0.1)
+    try:
+        while True:
+            service_background()
+            try:
+                client, address = server.accept()
+            except OSError:
                 continue
+            if handle_client(client):
+                # Response is complete before reboot, feeding throughout the delay.
+                for unused in range(12):
+                    if wdt:
+                        wdt.feed()
+                    time.sleep(0.25)
+                import machine
+                machine.reset()
+    finally:
+        server.close()
 
-            # Success response
-            cl.send("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n" +
-                    json.dumps({"success": True, "message": "Configuration saved"}))
-            cl.close()
 
-            # Reboot device after 3 seconds
-            print("[CONFIG] Configuration saved, rebooting in 3 seconds...")
-            wdt.feed()
-            time.sleep(3)
-            import machine
-            machine.reset()
-
-        except ValueError as e:
-            print(f"[ERROR] JSON parse error: {e}")
-            cl.send("HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\n\r\n" +
-                    json.dumps({"success": False, "error": f"Invalid JSON: {e}"}))
-            cl.close()
-        except Exception as e:
-            print(f"[ERROR] Config save error: {e}")
-            cl.send("HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\n\r\n" +
-                    json.dumps({"success": False, "error": str(e)}))
-            cl.close()
-        continue
-
-    cl.send("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n" + html_page())
-    cl.close()
+if __name__ == '__main__':
+    run()

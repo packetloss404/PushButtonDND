@@ -1,216 +1,229 @@
-import network
+"""Desk ESP32 firmware. Importing this module never starts hardware or servers."""
 import time
-import json
-import socket
-from machine import Pin
+import config
+from http_utils import HTTPError, read_request, send_response, parse_query, url_encode
 
-# Check for existing configuration
-has_config = False
-try:
-    import config
-    try:
-        import os
-        os.stat('/config.json')
-        has_config = True
-    except OSError:
-        has_config = False
-except ImportError:
-    config = None
-
-
-def url_decode(s):
-    """Decode URL-encoded string"""
-    s = s.replace('+', ' ')
-    parts = s.split('%')
-    result = parts[0]
-    for part in parts[1:]:
-        try:
-            result += chr(int(part[:2], 16)) + part[2:]
-        except (ValueError, IndexError):
-            result += '%' + part
-    return result
+DEBOUNCE_MS = 300
+RETRY_MS = 1000
+HTTP_TIMEOUT = 2
 
 
 def setup_page():
-    """Minimal config page for AP mode setup"""
     return """<!doctype html>
-<html><head>
+<html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>DND Desk Setup</title>
 <style>
-body{font-family:sans-serif;margin:20px;background:#1e1e1e;color:#fff}
+body{font-family:sans-serif;margin:20px;background:#1e1e1e;color:#fff;max-width:600px}
 input{width:100%;padding:8px;margin:4px 0 12px;box-sizing:border-box;border-radius:4px;border:1px solid #555;background:#333;color:#fff}
 label{font-weight:bold;font-size:14px}
 button{width:100%;padding:12px;background:#4CAF50;color:#fff;border:none;border-radius:6px;font-size:16px;cursor:pointer}
-h1{text-align:center}
-.info{color:#aaa;font-size:12px;margin-bottom:16px}
+h1{text-align:center}.info{color:#aaa;font-size:12px;margin-bottom:16px}
 </style></head><body>
 <h1>DND Desk Setup</h1>
 <p class="info">Connect this desk unit to your WiFi and configure the door unit address.</p>
 <form method="POST" action="/save">
-<label>WiFi SSID</label>
-<input name="ssid" required>
-<label>WiFi Password</label>
-<input name="password" type="password">
-<label>Door Unit URL</label>
-<input name="url" value="http://esp-doorlight.local/api/set">
-<label>Auth Token</label>
-<input name="token" value="SECRET123">
+<label for="ssid">WiFi SSID</label><input id="ssid" name="ssid" required>
+<label for="password">WiFi Password</label><input id="password" name="password" type="password">
+<label for="url">Door Unit URL</label><input id="url" name="url" type="url" required value="http://esp-doorlight.local/api/set">
+<label for="token">Auth Token</label><input id="token" name="token" value="">
+<p class="info">Use the token configured on the door unit; leave blank if authentication is disabled.</p>
 <button type="submit">Save &amp; Reboot</button>
 </form></body></html>"""
 
 
+def handle_setup_client(client, feed=None):
+    """Serve the actual setup protocol; return True when caller should reboot."""
+    def reply(status, body, content_type='text/plain'):
+        if feed:
+            feed()
+        send_response(client, status, body, content_type)
+
+    try:
+        method, target, headers, body = read_request(client)
+        if feed:
+            feed()
+        path = target.split('?', 1)[0]
+        if path == '/' and method == 'GET':
+            reply(200, setup_page(), 'text/html; charset=utf-8')
+        elif path == '/save':
+            if method != 'POST':
+                reply(405, 'Use POST to save settings')
+                return False
+            if headers.get('content-type', '').split(';', 1)[0].strip().lower() != 'application/x-www-form-urlencoded':
+                reply(415, 'Expected an HTML form')
+                return False
+            values = parse_query('/?' + body)
+            new_config = config.get_default_config()
+            new_config['wifi'] = {'ssid': values.get('ssid', ''), 'password': values.get('password', '')}
+            new_config['security']['auth_token'] = values.get('token', '')
+            new_config['desk'] = {'receiver_url': values.get('url', ''), 'source_tag': 'desk'}
+            if not new_config['wifi']['ssid'].strip():
+                reply(400, 'WiFi SSID is required')
+                return False
+            valid, error = config.validate_config(new_config)
+            if not valid:
+                reply(400, error)
+                return False
+            success, error = config.save_config(new_config)
+            if not success:
+                reply(500, 'Save failed: ' + str(error))
+                return False
+            reply(200, '<!doctype html><html><body><h2>Saved!</h2><p>Rebooting... Connect to your WiFi network.</p></body></html>', 'text/html; charset=utf-8')
+            return True
+        else:
+            reply(404, 'Not found')
+    except HTTPError as error:
+        try:
+            reply(error.status, error.message)
+        except OSError:
+            pass
+    except (ValueError, OSError) as error:
+        try:
+            reply(400, 'Invalid or incomplete request')
+        except OSError:
+            pass
+        print('[AP] Request error:', error)
+    finally:
+        try:
+            client.close()
+        except OSError:
+            pass
+    return False
+
+
+def should_enter_setup():
+    settings, error = config.load_config()
+    return bool(error or not settings['wifi']['ssid'].strip())
+
+
 def run_ap_setup():
-    """Run AP mode setup server. Reboots after config is saved."""
+    import network
+    import socket
+    import machine
+    wdt = machine.WDT(timeout=8000)
     ap = network.WLAN(network.AP_IF)
     ap.active(True)
     ap.config(essid='DND-Desk-Setup', authmode=0)
-
-    # Wait for AP to be active
-    while not ap.active():
-        time.sleep(0.1)
-
-    print(f"[AP] Setup AP active: {ap.ifconfig()}")
-    print("[AP] Connect to WiFi 'DND-Desk-Setup' and go to http://192.168.4.1")
-
-    s = socket.socket()
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    s.bind(('0.0.0.0', 80))
-    s.listen(1)
-
-    while True:
-        cl, addr = s.accept()
-        try:
-            req = cl.recv(1024).decode()
-            if not req:
-                cl.close()
-                continue
-
-            if req.startswith("POST /save"):
-                # Extract POST body
-                body = req.split('\r\n\r\n', 1)[1] if '\r\n\r\n' in req else ""
-
-                # Parse URL-encoded form data
-                params = {}
-                for pair in body.split('&'):
-                    if '=' in pair:
-                        k, v = pair.split('=', 1)
-                        params[k] = url_decode(v)
-
-                # Build config from defaults + form values
-                new_config = config.get_default_config()
-                new_config['wifi']['ssid'] = params.get('ssid', '')
-                new_config['wifi']['password'] = params.get('password', '')
-                new_config['security']['auth_token'] = params.get('token', 'SECRET123')
-                new_config['desk'] = {
-                    'receiver_url': params.get('url', 'http://esp-doorlight.local/api/set'),
-                    'source_tag': 'desk'
-                }
-
-                success, error = config.save_config(new_config)
-                if success:
-                    cl.send("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n"
-                            "<html><body style='background:#1e1e1e;color:#fff;font-family:sans-serif;text-align:center;padding:40px'>"
-                            "<h2>Saved!</h2><p>Rebooting... Connect to your WiFi network.</p></body></html>")
-                    cl.close()
-                    time.sleep(2)
-                    import machine
-                    machine.reset()
-                else:
-                    cl.send(f"HTTP/1.1 500 Error\r\nContent-Type: text/plain\r\n\r\nSave failed: {error}")
-                    cl.close()
-            else:
-                # Serve setup form
-                cl.send("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n" + setup_page())
-                cl.close()
-        except Exception as e:
-            print(f"[AP] Error: {e}")
+    print('[AP] Connect to DND-Desk-Setup and open http://192.168.4.1')
+    server = socket.socket()
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(('0.0.0.0', 80))
+    server.listen(1)
+    server.settimeout(1)
+    try:
+        while True:
+            wdt.feed()
             try:
-                cl.close()
-            except:
+                client, _ = server.accept()
+            except OSError:
+                continue
+            if handle_setup_client(client, wdt.feed):
+                wdt.feed()
+                time.sleep(2)
+                machine.reset()
+                return
+    finally:
+        server.close()
+
+
+def send_state(settings, state):
+    """Send with encoded arguments and a bounded socket timeout; report success."""
+    response = None
+    receiver = settings['desk']['receiver_url']
+    separator = '&' if '?' in receiver else '?'
+    url = receiver + separator + 'on=' + ('1' if state else '0')
+    url += '&source=' + url_encode(settings['desk']['source_tag'])
+    token = settings['security']['auth_token']
+    if token:
+        url += '&token=' + url_encode(token)
+    try:
+        try:
+            import requests as urequests
+        except ImportError:
+            import urequests
+        response = urequests.get(url, timeout=HTTP_TIMEOUT)
+        return 200 <= response.status_code < 300
+    except Exception as error:
+        print('[HTTP] State delivery failed:', error)
+        return False
+    finally:
+        if response is not None:
+            try:
+                response.close()
+            except OSError:
                 pass
 
 
+class SwitchSynchronizer:
+    """Debounce to a stable level and retry unacknowledged delivery after outages."""
+    def __init__(self, raw_state, now, sender):
+        self.candidate = raw_state
+        self.stable = raw_state
+        self.candidate_since = now
+        self.delivered = None
+        self.last_attempt = None
+        self.was_connected = False
+        self.sender = sender
+
+    def step(self, raw_state, now, connected):
+        if raw_state != self.candidate:
+            self.candidate = raw_state
+            self.candidate_since = now
+        if time.ticks_diff(now, self.candidate_since) >= DEBOUNCE_MS:
+            self.stable = self.candidate
+        if connected and not self.was_connected:
+            self.delivered = None
+            self.last_attempt = None
+        self.was_connected = connected
+        if connected and self.delivered != self.stable:
+            if self.last_attempt is None or time.ticks_diff(now, self.last_attempt) >= RETRY_MS:
+                self.last_attempt = now
+                if self.sender(not self.stable):
+                    self.delivered = self.stable
+
+
 def run_normal():
-    """Normal operation: monitor switch and send state to door unit."""
-    cfg, err = config.load_config()
-    if err:
-        print(f"Config error: {err}")
-
-    RECEIVER_URL = cfg.get('desk', {}).get('receiver_url', 'http://esp-doorlight.local/api/set')
-    TOKEN = cfg['security']['auth_token']
-    SOURCE = cfg.get('desk', {}).get('source_tag', 'desk')
-
-    switch_pin = Pin(15, Pin.IN, Pin.PULL_UP)
-    last_state = switch_pin.value()
-
-    # Wi-Fi connect with 30-second timeout
-    WIFI_TIMEOUT_MS = 30000
+    import network
+    from machine import Pin, WDT
+    settings, error = config.load_config()
+    if error or not settings['wifi']['ssid'].strip():
+        run_ap_setup()
+        return
+    wdt = WDT(timeout=8000)
+    switch = Pin(15, Pin.IN, Pin.PULL_UP)
     wifi = network.WLAN(network.STA_IF)
     wifi.active(True)
-    wifi.connect(cfg['wifi']['ssid'], cfg['wifi']['password'])
-    print("Connecting to Wi-Fi...")
-    wifi_start = time.ticks_ms()
-    while not wifi.isconnected():
-        if time.ticks_diff(time.ticks_ms(), wifi_start) > WIFI_TIMEOUT_MS:
-            print("[WIFI] Connection timeout after 30s, will retry in main loop")
-            break
-        time.sleep(0.5)
-    if wifi.isconnected():
-        print("Connected:", wifi.ifconfig())
-    else:
-        print("[WIFI] Not connected, will retry in main loop")
-
-    # Initialize hardware watchdog timer (8 second timeout)
-    from machine import WDT
-    wdt = WDT(timeout=8000)
-    print("[WDT] Watchdog timer initialized (8s timeout)")
-
-    def send_state(state):
-        try:
-            url = f"{RECEIVER_URL}?on={1 if state else 0}&source={SOURCE}"
-            if TOKEN:
-                url += f"&token={TOKEN}"
-            print("Sending", url)
-            import urequests
-            resp = urequests.get(url)
-            print(resp.text)
-            resp.close()
-        except Exception as e:
-            print("Error sending:", e)
-
+    try:
+        wifi.connect(settings['wifi']['ssid'], settings['wifi']['password'])
+    except OSError as error:
+        print('[WIFI] Initial connection failed:', error)
+    started = time.ticks_ms()
+    while not wifi.isconnected() and time.ticks_diff(time.ticks_ms(), started) < 30000:
+        wdt.feed()
+        time.sleep(0.1)
+    sync = SwitchSynchronizer(switch.value(), time.ticks_ms(), lambda state: send_state(settings, state))
     last_wifi_check = time.ticks_ms()
-    WIFI_CHECK_INTERVAL = 10000
-
-    print("Monitoring switch...")
     while True:
         wdt.feed()
         now = time.ticks_ms()
-
-        # Check switch state
-        state = switch_pin.value()
-        if state != last_state:
-            last_state = state
-            send_state(not state)  # LOW = ON (pull-up, switch to GND)
-            time.sleep(0.3)  # Debounce
-
-        # Check WiFi every 10 seconds
-        if time.ticks_diff(now, last_wifi_check) > WIFI_CHECK_INTERVAL:
+        connected = wifi.isconnected()
+        sync.step(switch.value(), now, connected)
+        if not connected and time.ticks_diff(now, last_wifi_check) >= 10000:
             last_wifi_check = now
-            if not wifi.isconnected():
-                print("[WIFI] Disconnected, reconnecting...")
-                wifi.connect(cfg['wifi']['ssid'], cfg['wifi']['password'])
-
+            try:
+                wifi.connect(settings['wifi']['ssid'], settings['wifi']['password'])
+            except OSError as error:
+                print('[WIFI] Reconnect failed:', error)
         time.sleep(0.05)
 
 
-# Entry point
-if has_config:
-    run_normal()
-else:
-    if config:
-        print("[DESK] No config found, entering AP setup mode")
+def run():
+    if should_enter_setup():
         run_ap_setup()
     else:
-        print("[ERROR] config.py module not found, cannot start")
-        print("[ERROR] Upload config.py to this device")
+        run_normal()
+
+
+if __name__ == '__main__':
+    run()

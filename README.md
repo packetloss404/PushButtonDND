@@ -1,375 +1,262 @@
-# PushButtonDND - ESP32 (MicroPython)
+# PushButtonDND
 
-**Profile**: Single-channel relay, **light normally OFF**, **active-HIGH** relay input.
+Two ESP32 boards run MicroPython: a desk switch sends HTTP commands to a door
+unit, whose web interface, API, and optional MQTT integration control a relay.
+The relay input is active HIGH on GPIO 2; the light starts OFF on every boot.
 
-## What's inside
-- `desk.py` — Desk ESP32. Reads a toggle (GPIO 15, to GND) and sends HTTP to the door ESP32. On first boot, creates an AP (`DND-Desk-Setup`) for WiFi/config setup.
-- `door.py` — Door ESP32. Hosts a tiny web UI and REST API and drives the relay on GPIO 2 (active HIGH).
-- `config.py` — Configuration management module. Loads/saves `/config.json`, validates settings, handles factory reset and backup.
-- `mqtt_client.py` — MQTT client wrapper. Handles Home Assistant auto-discovery, state publishing, command subscription, and reconnection.
-- `wiring-diagram.svg` — A simple wiring diagram covering both boards and the AC relay wiring.
-- `/door_unit_3D/` — Folder that stores the 3D Printing files for the door unit with bulb
-- `/door_unit_3D/DND_E26_DrillTemplate.dxf` — DXF template for wall mounting holes (export from .scad)
-- `/door_unit_3D/DND_E26_WallMount.scad` — OpenSCAD parametric model for E26 socket wall mount
-- `/door_unit_3D/README.md` — specific info for printing included
-- `/desk_unit_3D/` — Planned folder for the desk-unit-with-switch 3D printing files (not yet in repo)
-- This README.
+## Implemented features and verification
 
-> Still building out the 3D models and final designs
+- Door web controls, one-second status polling, theme toggle, and MQTT indicator.
+- Token-protected control and configuration; public state and event-log reads.
+- Door and desk first-boot WiFi setup pages; persistent JSON settings, backup,
+  explicit restore, and factory reset.
+- Desk switch debounce, initial state delivery, failed-delivery retry, and WiFi
+  recovery. Door background WiFi/MQTT work continues during HTTP traffic.
+- MQTT retained state, command subscription, Home Assistant discovery payload,
+  availability/LWT, keepalive ping, and scheduled reconnect attempts.
 
-## Flash MicroPython
-1. Download latest ESP32 MicroPython firmware: https://micropython.org/download/ESP32/
-2. Erase & flash (example on Windows COM3):
-   ```
-   esptool.py --port COM3 erase_flash
-   esptool.py --chip esp32 --port COM3 --baud 460800 write_flash -z 0x1000 esp32-*.bin
-   ```
-3. In Thonny: Interpreter → **MicroPython (ESP32)** → select port → open REPL.
+Automated tests exercise the actual firmware HTTP handlers using real TCP
+sockets and Playwright browsers. GPIO, WiFi, watchdog, and reboot are simulated
+at the hardware boundary. Separate tests use a real Mosquitto broker and the
+unmodified upstream MicroPython MQTT protocol client. This does **not** establish
+physical ESP32, relay, electrical, RF, or Home Assistant UI compatibility.
+See [feature coverage and remaining checks](docs/feature-audit.md).
 
-## Configure & Upload
-1. Upload `door.py`, `config.py`, and `mqtt_client.py` to the **door ESP32** (rename `door.py` to `main.py`). Default credentials are configured in `config.py` via `get_default_config()` and can be changed via the web configuration UI at `/config`. Reboot → note its IP in the REPL logs.
-2. Upload `desk.py` and `config.py` to the **desk ESP32** (rename `desk.py` to `main.py`).
-3. On first boot, the desk unit creates a WiFi AP named `DND-Desk-Setup`. Connect to it and navigate to `http://192.168.4.1` to configure WiFi credentials, door unit URL, and auth token.
-4. After saving, the desk unit reboots and connects to your WiFi network. Subsequent boots skip setup.
+Teams is a disabled UI placeholder: there is no presence integration or OAuth
+implementation. MQTT TLS, HTTPS serving, automatic mDNS registration, and the
+desk enclosure model are not implemented. The door CAD is a prototype, and its
+DXF file is a placeholder. `website_preview.png` is a historical image.
 
-## Use
-- Visit `http://<door-ip>/` for the Web UI.
-  - Features a live status ring that updates every second
-  - Dark/light theme toggle button
-  - Large ON/OFF control buttons
-- API:
-  - `GET /api/set?on=1&token=SECRET123` — Turn ON
-  - `GET /api/set?on=0&token=SECRET123` — Turn OFF
-  - `GET /api/state` — Read current state (JSON: `{"on":true,"last_ms":12345,"mqtt_status":"connected","mqtt_enabled":true}`)
-  - `GET /api/log` — Event log (JSON array of last 20 events with timestamps, types, and details)
+## Firmware files and first setup
 
-> API's can be fun, ya'll
+Choose the MicroPython image and flashing procedure for your exact board from
+[the official ESP32 downloads](https://micropython.org/download/ESP32/). Board
+variants can use different images and flash offsets. This audit did not flash a
+physical board.
 
-## Configuration
+Upload these files to each board's filesystem root using Thonny or mpremote:
 
-### Web-Based Configuration UI
+| Board | Files |
+| --- | --- |
+| Door | `door.py` renamed to `main.py`, `config.py`, `http_utils.py`, `mqtt_client.py` |
+| Desk | `desk.py` renamed to `main.py`, `config.py`, `http_utils.py` |
 
-Navigate to `http://<door-ip>/config?token=SECRET123` (replace with your AUTH_TOKEN) to access the configuration interface.
+The desk also needs current `requests` (or a compatible legacy `urequests`)
+with the `timeout` argument. The door needs current `umqtt.simple` only when
+MQTT is enabled; it must support `connect(timeout=...)`. Old packages fail safely
+rather than silently performing an unbounded request. Install dependencies from
+your computer, substituting the correct serial port:
 
-**Available Settings**:
-
-1. **WiFi Tab**:
-   - SSID: WiFi network name
-   - Password: WiFi password
-   - Changes require device reboot
-
-2. **Security Tab**:
-   - AUTH_TOKEN: Required for /api/set and /config endpoints
-   - Leave blank to disable authentication
-
-3. **MQTT Tab**:
-   - Enable MQTT Integration checkbox
-   - Broker Host: IP or hostname of MQTT broker (e.g., `homeassistant.local`)
-   - Port: Default 1883 (unencrypted) or 8883 (TLS)
-   - Username/Password: Optional credentials
-   - Topic Prefix: Base topic name (default: `pushbuttondnd`)
-   - Device Name: Friendly name shown in Home Assistant
-
-4. **Teams Tab** (Coming Soon):
-   - Placeholder for future Microsoft Teams integration
-   - Currently disabled
-
-**Saving Configuration**:
-- Click "Save & Reboot" to save changes
-- Device will reboot automatically in 3 seconds
-- Configuration persists across reboots in `/config.json`
-
-**Reset to Defaults**:
-- Click "Reset to Defaults" to restore factory settings
-- Deletes `/config.json` and reboots with hardcoded defaults
-
-**Fallback Behavior**:
-- If config file is corrupted or missing, device uses hardcoded defaults
-- Hardcoded values in code serve as backup configuration
-
-## MQTT Integration
-
-### Prerequisites
-
-- MQTT broker running on your network (e.g., Mosquitto)
-- For Home Assistant: MQTT integration enabled
-
-### Setup with Home Assistant
-
-1. **Enable MQTT in Door ESP32**:
-   - Navigate to `http://<door-ip>/config`
-   - Go to MQTT tab
-   - Check "Enable MQTT Integration"
-   - Enter your broker details:
-     - Broker: `homeassistant.local` (or broker IP)
-     - Port: `1883`
-     - Username/Password: (if required by broker)
-   - Click "Save & Reboot"
-
-2. **Auto-Discovery**:
-   - Device automatically publishes Home Assistant discovery message
-   - In Home Assistant, check Settings → Devices & Services → MQTT
-   - "DND Light" should appear automatically
-   - Entity ID: `light.dnd_light`
-
-3. **Control from Home Assistant**:
-   - Use the light entity in automations, scripts, dashboards
-   - State syncs bidirectionally (web UI ↔ MQTT ↔ Home Assistant)
-
-### MQTT Topics
-
-The device uses the following topic structure (prefix: `pushbuttondnd`):
-
-- **State Topic**: `pushbuttondnd/state`
-  - Payload: `ON` or `OFF`
-  - Published when light state changes
-  - Retained: Yes
-
-- **Command Topic**: `pushbuttondnd/set`
-  - Payload: `ON` or `OFF`
-  - Subscribe to control light remotely
-  - QoS: 1
-
-- **Availability Topic**: `pushbuttondnd/availability`
-  - Payload: `online` or `offline`
-  - Last Will and Testament (LWT)
-  - Indicates device connectivity
-
-- **Discovery Topic**: `homeassistant/light/pushbuttondnd/config`
-  - Published once on connection
-  - Contains Home Assistant auto-discovery configuration
-
-### MQTT Status Indicator
-
-The web UI shows MQTT connection status in the top-right corner:
-- **Green "MQTT: Connected"**: Successfully connected to broker
-- **Red "MQTT: Disconnected"**: Connection lost, attempting reconnection
-- **Grey "MQTT: Disabled"**: MQTT not enabled in configuration
-
-### Troubleshooting MQTT
-
-**Connection Failed**:
-- Verify broker is running: `mosquitto -v` or check Home Assistant logs
-- Check broker hostname/IP is correct and reachable
-- Ensure port 1883 is not blocked by firewall
-- Test with MQTT client: `mosquitto_sub -h homeassistant.local -t '#'`
-
-**Auto-Discovery Not Working**:
-- Verify Home Assistant MQTT integration is enabled
-- Check MQTT integration settings show the device
-- Look for discovery message: `mosquitto_sub -h localhost -t 'homeassistant/#'`
-- Try restarting Home Assistant MQTT integration
-
-**Commands Not Working**:
-- Check device is subscribed: Look for "[MQTT] Subscribed to pushbuttondnd/set" in REPL
-- Test command: `mosquitto_pub -h localhost -t 'pushbuttondnd/set' -m 'ON'`
-- Verify QoS settings match
-
-**Reconnection Loop**:
-- Device attempts reconnection every 60 seconds with exponential backoff
-- After 10 failed attempts, stops trying (reboot device to retry)
-- Check broker logs for connection errors
-
-## Wiring (summary)
-### Desk unit (transmitter)
-- **ESP32 GPIO 15** → one side of toggle switch
-- **ESP32 GND** → other side of switch
-- **USB 5 V** powers ESP32
-
-### Door unit (receiver)
-- **ESP32 GPIO 2** → **Relay IN** (active HIGH)
-- **ESP32 5 V (USB)** → **Relay VCC**
-- **ESP32 GND** → **Relay GND**
-- **Relay COM ↔ AC hot (from mains)**
-- **Relay NO ↔ Load hot (to red bulb)**
-- Neutral goes directly to the bulb. Earth ground per local code.
-
-> The relay **only** switches the **hot leg**. With NO contact the light is **normally off**.
-
-## Hardware Requirements
-- **ESP32 Dev Boards** (2) — Any ESP32 with WiFi support
-- **Relay Module** — Single-channel, active-HIGH, rated for your mains voltage (e.g., 120V/240V AC) and bulb wattage
-  - Common options: SRD-05VDC-SL-C relay boards, SSR modules
-  - Minimum 5A rating recommended for most bulbs
-- **Toggle Switch** — SPST or SPDT for desk unit
-- **Red Bulb** — E26 socket, standard wattage (check relay rating)
-- **Power Supplies** — USB power for both ESP32 boards (5V, 500mA+)
-- **Wire** — 18-22 AWG for low voltage, appropriate gauge for AC (per local code)
-
-## Safety
-- Use a relay module rated for your mains voltage and bulb current.
-- Keep AC wiring isolated in a proper enclosure with strain relief.
-- Do not share low-voltage wiring inside the AC compartment.
-- If unsure about mains wiring, consult a qualified electrician.
-
-> Don't be a dumbass!
-
-## Troubleshooting
-
-### ESP32 won't connect to WiFi
-- Verify SSID and PASSWORD are correct (case-sensitive)
-- Check WiFi is 2.4 GHz (ESP32 doesn't support 5 GHz)
-- Monitor REPL in Thonny to see connection status
-- Try rebooting the ESP32 or reflashing firmware
-
-### Desk unit can't reach door unit
-- Verify both ESP32s are on the same WiFi network
-- Check `RECEIVER_URL` in `desk.py` matches door IP or mDNS hostname
-- Test door API manually: `curl http://<door-ip>/api/state`
-- Ensure firewall isn't blocking port 80 on door ESP32
-- If using mDNS (`esp-doorlight.local`), ensure your router supports it
-
-### Lost door IP address
-- Connect to door ESP32 via Thonny and check REPL output
-- Look in your router's DHCP client list
-- Set a static IP in `door.py` using `wlan.ifconfig()` after connection
-- Use mDNS: `http://esp-doorlight.local/` (if supported by network)
-
-### Relay not switching
-- Verify GPIO 2 is going HIGH (use multimeter or LED test)
-- Check relay VCC and GND are connected to ESP32 5V/GND
-- Confirm relay module is active-HIGH (some are active-LOW)
-- Test relay manually by connecting IN pin directly to 5V
-
-### Web UI shows wrong state
-- The live polling updates every second; give it time to sync
-- Hard refresh browser (Ctrl+F5) to clear cached page
-- Check `/api/state` endpoint directly for actual state
-- Verify desk toggle changes are reaching door unit (check REPL logs)
-
-### Factory Reset / Restore Defaults
-
-**Method 1: Via Web UI** (Recommended)
-1. Navigate to `http://<door-ip>/config?token=SECRET123`
-2. Click "Reset to Defaults" button at bottom of page
-3. Confirm the reset
-4. Device deletes `/config.json` and reboots with hardcoded defaults
-
-**Method 2: Via Thonny REPL** (If web UI is inaccessible)
-1. Connect to ESP32 via USB using Thonny IDE
-2. Open REPL (bottom panel)
-3. Run the following commands:
-   ```python
-   import config
-   config.factory_reset()
-   ```
-4. Device will delete `/config.json` and reboot automatically
-
-**Method 3: Manual File Deletion** (Advanced)
-1. Connect via Thonny REPL
-2. Delete config file manually:
-   ```python
-   import os
-   os.remove('/config.json')
-   ```
-3. Reboot device:
-   ```python
-   import machine
-   machine.reset()
-   ```
-
-**After Factory Reset**:
-- Device boots with hardcoded defaults from code
-- WiFi credentials: `SSID = "***REMOVED***"`, `PASSWORD = "***REMOVED***"`
-- Auth token: `SECRET123`
-- MQTT: Disabled
-- All settings can be reconfigured via web UI
-
-**Restore from Backup**:
-If you accidentally reset and want to restore previous settings:
-1. Via REPL: `import config; config.restore_backup()`
-2. This restores from `/config.json.backup` (if it exists)
-3. Device will use the backed-up configuration
-
-## mDNS Setup (Optional)
-To use `esp-doorlight.local` instead of IP addresses, add this to `door.py` after WiFi connection:
-
-```python
-import network
-# ... after wlan.connect() and isconnected() ...
-wlan.config(dhcp_hostname="esp-doorlight")
-# Or use the network module's mDNS if available in your MicroPython build
+```sh
+mpremote connect COM3 mip install umqtt.simple
+mpremote connect COM4 mip install requests
 ```
 
-Note: mDNS support varies by MicroPython version and network environment.
+On a network-connected board the equivalent is `import mip` followed by
+`mip.install("umqtt.simple")` or `mip.install("requests")`. See the official
+[MicroPython package installation guide](https://docs.micropython.org/en/latest/reference/packages.html).
+The integration tests pin the upstream MQTT source and license in
+[tests/vendor](tests/vendor/README.md); test that version when updating libraries.
 
-## Future: Microsoft Teams Integration
+Defaults contain **blank WiFi credentials and a blank authentication token**.
+There is no shipped shared secret.
 
-The configuration UI includes placeholders for Microsoft Teams integration (currently disabled).
+1. Boot the door. With no configured SSID it opens the unencrypted
+   `DND-Door-Setup` AP. Connect and open `http://192.168.4.1/config` (confirm its
+   address in serial output if different). Enter WiFi and a token, then save.
+2. After reboot, note the door's station IP in serial output or the router's
+   DHCP list. Open `http://<door-ip>/`.
+3. Boot the desk. It opens `DND-Desk-Setup` when settings are missing, invalid,
+   or have a blank SSID. Open `http://192.168.4.1`, enter WiFi, the door URL
+   `http://<door-ip>/api/set`, and the same token. Save and reconnect to WiFi.
+4. Close the desk toggle to GND to request ON; open it to request OFF.
+   The desk sends its physical state at startup, so it can override a web state.
 
-### Planned Functionality
+Setup APs and HTTP send credentials in plaintext. Provision on a trusted local
+network and set a token before normal use. The door public page does not embed
+the token: enter it in the API token field to use ON/OFF or Settings. A blank
+token intentionally disables authentication. State and event logs stay public.
 
-When implemented, this feature will:
-1. Poll Microsoft Graph API for user presence status
-2. Automatically turn ON DND light when status is "In a meeting", "Busy", or "Do not disturb"
-3. Turn OFF light when status returns to "Available"
-4. Bidirectional sync: Manual light control can update Teams status
+A configured SSID with incorrect credentials is retried; it does not
+necessarily enter setup mode. To recover inaccessible settings, delete
+`/config.json` through the serial REPL and reboot. Hostname resolution for the
+default `esp-doorlight.local` URL depends on your network; the firmware does not
+register that mDNS name. Use the observed IP address if needed.
 
-### Implementation Requirements
+## Web configuration and REST API
 
-**Azure AD App Registration**:
-- Register application in Azure AD portal (https://portal.azure.com)
-- Grant permissions: `Presence.Read`, `Presence.Read.All`, `User.Read`
-- Generate client secret
-- Note Client ID, Tenant ID, and Client Secret
+Open Settings from the control page after entering your token, or use
+`/config?token=<URL-encoded-token>`. WiFi, Security, and MQTT tabs are editable.
+Teams fields are disabled. Password visibility buttons and the light/dark theme
+are available. Save validates settings, writes `/config.json`, returns a success
+response, then reboots after about three seconds.
 
-**MicroPython Challenges**:
-- OAuth 2.0 token acquisition and refresh workflow
-- HTTPS requests to Graph API (requires TLS/SSL support)
-- Token caching and expiration handling
-- Limited RAM for TLS connections (~40-60 KB overhead)
+| Method and path | Behavior | Authentication |
+| --- | --- | --- |
+| `GET /` | Control page | Public |
+| `GET /api/state` | State and MQTT connection flags | Public |
+| `GET /api/log` | Last 20 state/WiFi/MQTT events | Public |
+| `GET /api/set?on=1` | Turn ON (`0` turns OFF; `true`/`false` also accepted) | Token if configured |
+| `GET /config` | Settings page | Token if configured |
+| `POST /api/config` | JSON configuration save and reboot | Token if configured |
+| `POST /api/config/reset` | Delete active configuration and reboot | Token if configured |
 
-**Recommended Approaches**:
+Pass the exact token as a URL-encoded `token` query parameter or an
+`Authorization: Bearer <token>` header. A `source` query value on `/api/set`
+appears in the event log; it is caller supplied, not proof of origin. Unknown
+routes return 404, unsupported methods 405, bad values/JSON 400, invalid tokens
+403, and oversized requests 413.
 
-1. **Proxy Server Approach** (Recommended):
-   - Deploy intermediate proxy server (Node.js, Python Flask, etc.)
-   - Proxy handles OAuth flow and Graph API calls
-   - ESP32 polls simple HTTP endpoint on proxy
-   - Reduces memory footprint and complexity
-   - Example: Proxy returns `{"status": "busy"}` in JSON
+```sh
+curl -H "Authorization: Bearer YOUR_TOKEN" "http://DOOR_IP/api/set?on=1&source=api"
+curl "http://DOOR_IP/api/state"
+curl "http://DOOR_IP/api/log"
+```
 
-2. **Power Automate / Logic Apps**:
-   - Use Microsoft Power Automate flow
-   - Trigger: Teams presence changes
-   - Action: POST to ESP32 `/api/set` endpoint
-   - No polling needed, event-driven
-   - Requires Power Automate Premium license
+Example state response:
 
-3. **Webhook Approach**:
-   - Microsoft Teams webhook sends presence updates
-   - ESP32 receives webhooks via HTTP POST
-   - Requires public IP or VPN for ESP32 accessibility
+```json
+{"on":true,"last_ms":12345,"mqtt_status":"connected","mqtt_enabled":true}
+```
 
-### Configuration
+`last_ms` is elapsed time since the last command, using a wrap-aware tick
+calculation. Event timestamps are monotonic device ticks, not wall-clock dates.
+State and logs are in memory and reset at boot.
 
-Teams settings are pre-configured in the web UI but currently disabled:
-- Navigate to Settings → Teams tab
-- Fields are greyed out with "Coming Soon" badge
-- When feature is implemented, simply enable the checkbox
+`config.py` merges missing fields with defaults and rejects malformed settings.
+Successful saves keep the prior configuration in `/config.json.backup` and
+replace the active file through a temporary file. Missing/corrupt configuration
+falls back to blank defaults; a backup is not automatically restored.
 
-### Development Status
+Reset preserves the backup for deliberate recovery. Through the serial REPL:
 
-- **UI**: Complete (disabled)
-- **Configuration storage**: Complete
-- **Integration code**: Not implemented
-- **Estimated complexity**: Medium-High
+```python
+import config
+config.factory_reset()  # Delete active settings and reboot into initial setup.
+```
 
-Contributions welcome! See implementation plan in project documentation.
+To restore an existing valid backup:
 
-## TODO
+```python
+import config
+success, error = config.restore_backup()
+print(success, error)
+if success:
+    import machine
+    machine.reset()
+```
 
-- Add physical button override indicator when the toggle switch on the desk side is used
+Changing the token takes effect after reboot. Re-enter the new token on the
+control page. A reset removes WiFi and token settings; reconnect to the setup AP.
 
-## Completed Features
+## MQTT and Home Assistant
 
-- Live JS polling status ring (12/3/25)
-- Web-based configuration UI with persistent storage (12/9/25)
-- MQTT integration with Home Assistant auto-discovery (12/9/25)
-- Real-time MQTT connection status indicator (12/9/25)
-- Teams integration UI placeholder (12/9/25)
-- WiFi reconnection with 30-second boot timeout and automatic recovery (1/28/26)
-- Hardware watchdog timer on both units (8-second timeout) (1/28/26)
-- Non-blocking MQTT reconnection with exponential backoff (1/28/26)
-- Desk unit AP mode setup (`DND-Desk-Setup`) for first-boot configuration (1/28/26)
-- Desk unit config persistence via `config.py` (no more hardcoded credentials) (1/28/26)
-- Event log: in-memory ring buffer of last 20 events via `/api/log` endpoint (1/28/26)
+Enable MQTT in Settings and enter a reachable broker, port, optional username
+and password, topic prefix, and device name. MQTT is plaintext TCP only. Port
+1883 is the usual plaintext default; selecting 8883 does **not** enable TLS.
+QoS 0 or 1 is supported by the API; the web form uses QoS 1. Give each door a
+separate topic prefix to avoid overlapping command/state/discovery topics.
+
+With the default prefix `pushbuttondnd`:
+
+| Topic | Direction and payload |
+| --- | --- |
+| `pushbuttondnd/set` | Subscribe: `ON` or `OFF` |
+| `pushbuttondnd/state` | Retained publish: `ON` or `OFF` |
+| `pushbuttondnd/availability` | Retained `online`; LWT/clean disconnect `offline` |
+| `homeassistant/light/pushbuttondnd/config` | Retained Home Assistant discovery JSON |
+
+For a prefix containing `/`, discovery instead uses
+`homeassistant/light/<hardware-client-id>/config` so its object ID remains one
+path segment; state, command, and availability topics keep the full prefix.
+
+Connection publishes discovery and current state before reporting online.
+Changes made while disconnected are cached and published after reconnection.
+Home Assistant's MQTT integration must be enabled; its entity ID is assigned by
+Home Assistant and is not guaranteed to be `light.dnd_light`. Discovery payload
+and broker behavior are tested, including broker commands reaching the actual
+door relay logic and HTTP control publishing state back to the broker. The
+Home Assistant application was not run.
+
+Discovery asks Home Assistant to send **non-retained commands**; firmware state
+is still retained. If an older configuration left an `ON` command retained on
+the broker, clear that old command deliberately before relying on OFF at boot:
+
+```sh
+mosquitto_pub -h BROKER_IP -t 'pushbuttondnd/set' -r -n
+```
+
+Substitute your actual command topic and broker credentials. This only clears
+the retained command; the firmware does not silently delete broker messages.
+
+The UI displays Connected, Disconnected, or Disabled from the door's live state.
+Backoff waits do not sleep: reconnect delays are 5, 10, 30, then 60 seconds, with
+at most ten attempts before giving up. WiFi recovery resets retries; rebooting
+also resets them. TCP/MQTT operations remain synchronous, with one-second socket
+timeouts and operation deadlines. DNS resolution can still block according to
+the MicroPython platform. This is not a fully asynchronous MQTT client.
+
+For local diagnosis:
+
+```sh
+mosquitto_sub -h BROKER_IP -t 'pushbuttondnd/#' -v
+mosquitto_pub -h BROKER_IP -t 'pushbuttondnd/set' -m 'ON' -q 1
+```
+
+## Tests and CI
+
+Use Python 3.11 or newer on your development computer (local verification used
+Python 3.13):
+
+```sh
+python -m pip install -r requirements-dev.txt
+python -m playwright install chromium firefox webkit
+python -m pytest -v
+```
+
+On Linux, install system dependencies too:
+
+```sh
+python -m playwright install --with-deps chromium firefox webkit
+```
+
+Broker tests launch a locally installed `mosquitto` executable;
+set `MOSQUITTO_PATH` if it is outside PATH. Alternatively, point them at a
+**dedicated disposable broker** with `MQTT_TEST_HOST` and `MQTT_TEST_PORT` (tests
+use retained topics and intentionally drop connections). Missing Mosquitto skips
+broker tests locally; `REQUIRE_MQTT_BROKER=1` makes that a failure, as CI requires.
+Set `BROWSER_ENGINES=chromium` for a shorter local browser run; the default runs
+all three engines. For firmware/helper and desk TCP tests only:
+
+```sh
+python -m pytest -m "not browser and not broker" -v
+```
+
+GitHub Actions installs the browsers and Mosquitto, runs the full suite, and
+retains browser screenshots/traces as test artifacts. Browser tests start real
+socket servers using the shipping handlers; no frontend routes are mocked.
+They simulate configuration-triggered reboot by reloading saved settings.
+Desk-to-door tests also use the actual sender and unmodified upstream requests
+over real TCP, including rejected-token retry and connection-failure recovery.
+Physical watchdog reset, WiFi radios, relay contacts, and flash power loss still
+need board testing. This project has no hosted website deployment or OTA updater;
+firmware is uploaded to each ESP32 explicitly. No deployment was performed in
+this audit.
+
+## Wiring and mechanical prototype
+
+| Connection | Purpose |
+| --- | --- |
+| Desk GPIO 15 to toggle, other side to GND | Pull-up input; LOW requests ON |
+| Door GPIO 2 to compatible relay IN | Active HIGH output |
+| Door/relay common GND and suitable supplies | Verify the relay's voltage/current and logic compatibility |
+| Relay COM to mains hot; NO to load hot | Normally OFF load; neutral bypasses relay |
+
+See [wiring-diagram.svg](wiring-diagram.svg) and the
+[door CAD notes](door_unit_3D/README.md). The OpenSCAD source is a prototype; the
+checked-in DXF is not a usable drill template. Desk CAD is still planned.
+
+Use a relay and enclosure suitable for the actual mains/load ratings. Isolate
+mains from low-voltage wiring, provide strain relief, and follow applicable earth
+and electrical requirements with qualified help. Software tests do not verify
+mains safety, thermal performance, print material, socket fit, or relay behavior.

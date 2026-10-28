@@ -10,6 +10,10 @@ try:
 except ImportError:
     os = None
 
+CONFIG_PATH = '/config.json'
+BACKUP_PATH = '/config.json.backup'
+TEMP_PATH = '/config.json.tmp'
+
 
 def get_default_config():
     """Return default configuration dictionary.
@@ -83,18 +87,24 @@ def load_config():
         # Check if file exists
         if os and hasattr(os, 'stat'):
             try:
-                os.stat('/config.json')
-            except OSError:
-                # File doesn't exist, return defaults
-                print("[CONFIG] No config file found, using defaults")
-                return (defaults, None)
+                os.stat(CONFIG_PATH)
+            except OSError as error:
+                if error.args and error.args[0] == 2:
+                    print("[CONFIG] No config file found, using defaults")
+                    return (defaults, None)
+                raise
 
         # Read and parse config file
-        with open('/config.json', 'r') as f:
+        with open(CONFIG_PATH, 'r') as f:
             loaded = json.load(f)
 
         # Merge with defaults to ensure all fields exist
+        if not isinstance(loaded, dict):
+            raise ValueError('Configuration must be an object')
         config = _merge_config(defaults, loaded)
+        valid, error = validate_config(config)
+        if not valid:
+            raise ValueError(error)
 
         print("[CONFIG] Loaded configuration from /config.json")
         return (config, None)
@@ -112,6 +122,17 @@ def load_config():
         return (defaults, error_msg)
 
 
+def _replace_file(source, destination):
+    """Replace without deleting the last good file before the rename succeeds."""
+    if os is None:
+        raise OSError('Filesystem unavailable')
+    if hasattr(os, 'replace'):
+        os.replace(source, destination)
+    else:
+        # MicroPython littlefs/VFS rename replaces an existing destination.
+        os.rename(source, destination)
+
+
 def save_config(config_dict):
     """
     Atomically save configuration to /config.json
@@ -125,42 +146,34 @@ def save_config(config_dict):
         if not valid:
             return (False, f"Validation failed: {error}")
 
-        # Create backup of existing config if it exists
-        if os and hasattr(os, 'stat'):
-            try:
-                os.stat('/config.json')
-                # File exists, create backup
-                try:
-                    # Read existing config
-                    with open('/config.json', 'r') as f:
-                        backup_data = f.read()
-                    # Write backup
-                    with open('/config.json.backup', 'w') as f:
-                        f.write(backup_data)
-                    print("[CONFIG] Created backup: /config.json.backup")
-                except Exception as e:
-                    print(f"[WARN] Could not create backup: {e}")
-            except OSError:
-                # File doesn't exist, no backup needed
-                pass
+        config_dict = _merge_config(get_default_config(), config_dict)
 
-        # Write to temporary file first (atomic write)
-        with open('/config.json.tmp', 'w') as f:
+        # Finish the new file before touching the existing configuration/backup.
+        with open(TEMP_PATH, 'w') as f:
             json.dump(config_dict, f)
 
-        # Rename temp file to actual config
-        if os and hasattr(os, 'rename'):
-            try:
-                os.remove('/config.json')
-            except OSError:
-                pass  # File might not exist
-            os.rename('/config.json.tmp', '/config.json')
+        # Never replace a valid backup with a corrupt active configuration.
+        backup_data = None
+        try:
+            with open(CONFIG_PATH, 'r') as f:
+                previous_text = f.read()
+        except OSError as error:
+            if not error.args or error.args[0] != 2:
+                raise
         else:
-            # Fallback for systems without os.rename
-            with open('/config.json.tmp', 'r') as f:
-                data = f.read()
-            with open('/config.json', 'w') as f:
-                f.write(data)
+            try:
+                previous = _merge_config(get_default_config(), json.loads(previous_text))
+                previous_valid, _ = validate_config(previous)
+                if previous_valid:
+                    backup_data = previous_text
+            except (ValueError, TypeError, AttributeError):
+                pass
+        if backup_data is not None:
+            with open(BACKUP_PATH + '.tmp', 'w') as f:
+                f.write(backup_data)
+            _replace_file(BACKUP_PATH + '.tmp', BACKUP_PATH)
+
+        _replace_file(TEMP_PATH, CONFIG_PATH)
 
         print("[CONFIG] Configuration saved to /config.json")
         return (True, None)
@@ -172,111 +185,97 @@ def save_config(config_dict):
 
 
 def validate_config(config_dict):
-    """
-    Validate configuration structure and values
-    Returns: (valid, error_message)
-    """
+    """Reject malformed types and values before they reach hardware/network code."""
+    if not isinstance(config_dict, dict):
+        return (False, "Configuration must be an object")
+    for key in ('version', 'wifi', 'security', 'mqtt', 'teams', 'features'):
+        if key not in config_dict:
+            return (False, "Missing required key: " + key)
+    if type(config_dict['version']) is not int or config_dict['version'] != 1:
+        return (False, "Unsupported configuration version")
+    defaults = get_default_config()
+    for section in ('wifi', 'security', 'mqtt', 'teams', 'features', 'desk'):
+        if section in config_dict and not isinstance(config_dict[section], dict):
+            return (False, section + " must be an object")
+    for key in ('ssid', 'password'):
+        if key not in config_dict['wifi']:
+            return (False, "Missing wifi." + key)
+    for section, fields in defaults.items():
+        if not isinstance(fields, dict):
+            continue
+        supplied = config_dict.get(section, {})
+        for key, default in fields.items():
+            if key not in supplied:
+                continue
+            value = supplied[key]
+            if type(default) is str and not isinstance(value, str):
+                return (False, section + "." + key + " must be a string")
+            if type(default) is bool and type(value) is not bool:
+                return (False, section + "." + key + " must be a boolean")
+            if type(default) is int and type(value) is not int:
+                return (False, section + "." + key + " must be an integer")
+    merged = _merge_config(defaults, config_dict)
+    if len(merged['wifi']['ssid'].encode('utf-8')) > 32:
+        return (False, "wifi.ssid must be at most 32 UTF-8 bytes")
+    mqtt = merged['mqtt']
+    if not 1 <= mqtt['port'] <= 65535:
+        return (False, "mqtt.port must be between 1 and 65535")
+    if mqtt['qos'] not in (0, 1):
+        return (False, "mqtt.qos must be 0 or 1 (umqtt.simple does not support QoS 2)")
+    if not mqtt['topic_prefix'] or any(c in mqtt['topic_prefix'] for c in ('#', '+', '\x00')):
+        return (False, "mqtt.topic_prefix must be nonempty without MQTT wildcards")
+    if mqtt['enabled'] and not mqtt['broker'].strip():
+        return (False, "mqtt.broker is required when MQTT is enabled")
+    if merged['teams']['polling_interval'] < 1:
+        return (False, "teams.polling_interval must be positive")
+    url = merged['desk']['receiver_url']
+    # The desk sends a GET to an explicit HTTP endpoint; fragment and userinfo
+    # would be interpreted differently by clients and are not supported.
+    if not url.startswith('http://') or not url[7:].split('/', 1)[0] or any(c in url for c in ('#', '@', ' ', '\r', '\n')):
+        return (False, "desk.receiver_url must be an http:// URL without credentials or fragments")
+    if any(c in merged['security']['auth_token'] for c in ('\r', '\n', '\x00')):
+        return (False, "security.auth_token must not contain control characters")
+    return (True, None)
+
+
+def reset_config():
+    """Delete the active configuration; retain a backup for explicit recovery."""
+    if os is None:
+        return (False, "Filesystem unavailable")
     try:
-        # Check required top-level keys
-        required_keys = ['version', 'wifi', 'security', 'mqtt', 'teams', 'features']
-        for key in required_keys:
-            if key not in config_dict:
-                return (False, f"Missing required key: {key}")
-
-        # Validate wifi section
-        if 'ssid' not in config_dict['wifi']:
-            return (False, "Missing wifi.ssid")
-        if 'password' not in config_dict['wifi']:
-            return (False, "Missing wifi.password")
-
-        # Validate MQTT port is integer
-        if 'port' in config_dict['mqtt']:
-            try:
-                int(config_dict['mqtt']['port'])
-            except (ValueError, TypeError):
-                return (False, "mqtt.port must be an integer")
-
-        # Validate MQTT QoS is 0, 1, or 2
-        if 'qos' in config_dict['mqtt']:
-            qos = config_dict['mqtt']['qos']
-            if qos not in [0, 1, 2]:
-                return (False, "mqtt.qos must be 0, 1, or 2")
-
-        # Validate Teams polling interval is positive integer
-        if 'polling_interval' in config_dict['teams']:
-            try:
-                interval = int(config_dict['teams']['polling_interval'])
-                if interval < 1:
-                    return (False, "teams.polling_interval must be positive")
-            except (ValueError, TypeError):
-                return (False, "teams.polling_interval must be an integer")
-
-        # Validate desk section (optional, only present on desk units)
-        if 'desk' in config_dict:
-            desk = config_dict['desk']
-            if 'receiver_url' in desk:
-                if not isinstance(desk['receiver_url'], str):
-                    return (False, "desk.receiver_url must be a string")
-                if desk['receiver_url'] and not desk['receiver_url'].startswith("http"):
-                    return (False, "desk.receiver_url must start with http")
-
+        os.stat(CONFIG_PATH)
+    except OSError as error:
+        if error.args and error.args[0] == 2:
+            return (True, None)
+        return (False, str(error))
+    try:
+        os.remove(CONFIG_PATH)
         return (True, None)
-
-    except Exception as e:
-        return (False, f"Validation error: {e}")
+    except OSError as error:
+        return (False, str(error))
 
 
 def factory_reset():
-    """
-    Delete config file and reboot to defaults
-    Use with caution!
-    """
-    try:
-        if os and hasattr(os, 'remove'):
-            os.remove('/config.json')
-            print("[CONFIG] Factory reset: config.json deleted")
-
-        # Reboot
-        import machine
-        print("[CONFIG] Rebooting...")
-        machine.reset()
-    except Exception as e:
-        print(f"[ERROR] Factory reset failed: {e}")
+    """Delete the active config and reboot, including when already unconfigured."""
+    success, error = reset_config()
+    if not success:
+        return (False, error)
+    import machine
+    machine.reset()
+    return (True, None)
 
 
 def restore_backup():
-    """
-    Restore configuration from backup file
-    Returns: (success, error_message)
-    """
+    """Validate and atomically restore backup without overwriting that backup."""
     try:
-        # Check if backup exists
-        if os and hasattr(os, 'stat'):
-            try:
-                os.stat('/config.json.backup')
-            except OSError:
-                return (False, "No backup file found")
-
-        # Read backup
-        with open('/config.json.backup', 'r') as f:
-            backup_data = f.read()
-
-        # Parse to validate
-        backup_config = json.loads(backup_data)
-
-        # Validate
+        with open(BACKUP_PATH, 'r') as f:
+            backup_config = _merge_config(get_default_config(), json.load(f))
         valid, error = validate_config(backup_config)
         if not valid:
-            return (False, f"Backup validation failed: {error}")
-
-        # Write to config
-        with open('/config.json', 'w') as f:
-            f.write(backup_data)
-
-        print("[CONFIG] Restored from backup")
+            return (False, "Backup validation failed: " + error)
+        with open(TEMP_PATH, 'w') as f:
+            json.dump(backup_config, f)
+        _replace_file(TEMP_PATH, CONFIG_PATH)
         return (True, None)
-
-    except Exception as e:
-        error_msg = f"Error restoring backup: {e}"
-        print(f"[ERROR] {error_msg}")
-        return (False, error_msg)
+    except Exception as error:
+        return (False, "Error restoring backup: " + str(error))
