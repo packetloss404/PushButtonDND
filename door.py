@@ -319,7 +319,7 @@ def html_page():
   OFF
 </button>
 
-<a href="/config" onclick="this.href='/config'+tokenQuery()" class="btn-settings">
+<a href="/config" onclick="openSettings(event, this)" class="btn-settings">
   Settings
 </a>
 
@@ -336,6 +336,12 @@ tokenInput.value = new URLSearchParams(window.location.search).get('token') || '
 function tokenQuery() {{
   return tokenInput.value ? '?token=' + encodeURIComponent(tokenInput.value) : '';
 }}
+function openSettings(event, link) {{
+  link.href = '/config' + tokenQuery();
+  if (event.button === 0 && !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey) {{
+    stopPolling();
+  }}
+}}
 async function setLight(on) {{
   const error = document.getElementById('control_error');
   error.textContent = '';
@@ -348,10 +354,32 @@ async function setLight(on) {{
 }}
 
 /* ========== LIVE POLLING ========== */
+let pollTimer = null;
+let pollController = null;
+let pollingPaused = false;
+function stopPolling() {{
+  pollingPaused = true;
+  clearInterval(pollTimer);
+  pollTimer = null;
+  if (pollController) pollController.abort();
+  pollController = null;
+}}
+function startPolling() {{
+  pollingPaused = false;
+  pollState();
+  if (pollTimer === null) pollTimer = setInterval(pollState, 1000);
+}}
 function pollState() {{
-  fetch('/api/state')
-    .then(r => r.json())
+  if (pollingPaused || pollController) return;
+  const controller = new AbortController();
+  pollController = controller;
+  fetch('/api/state', {{signal: controller.signal}})
+    .then(r => {{
+      if (!r.ok) throw new Error('State request failed');
+      return r.json();
+    }})
     .then(data => {{
+      if (pollingPaused || controller.signal.aborted) return;
       let on = data.on;
       let glow = document.getElementById("glow");
 
@@ -381,12 +409,19 @@ function pollState() {{
         mqttEl.className = "mqtt-status mqtt-disabled";
       }}
     }})
-    .catch(e => console.log("Polling error:", e));
+    .catch(e => {{
+      if (e.name !== 'AbortError') console.log("Polling error:", e);
+    }})
+    .finally(() => {{
+      if (pollController === controller) pollController = null;
+    }});
 }}
 
-// Poll every second
-pollState();
-setInterval(pollState, 1000);
+// Stop before navigation begins: WebKit can replace its fetch context before
+// pagehide. Resume when returning through the browser's back/forward cache.
+window.addEventListener('pagehide', stopPolling);
+window.addEventListener('pageshow', () => {{ if (pollingPaused) startPolling(); }});
+startPolling();
 </script>
 
 </body>

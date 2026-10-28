@@ -38,6 +38,8 @@ sender/handlers over TCP, adapting only socket stream and text/bytes compatibili
 - Embedded token disclosure and unescaped config values broke/compromised the
   public UI; user-entered control tokens and escaped output replace them.
 - HTTP load could starve WiFi/MQTT background work; each loop now services it.
+- Status polling stops before Settings navigation and resumes on return; browser
+  tests keep servers alive until contexts close and verify slow navigation.
 - Config validation, atomic replacement, reset-without-file, and backup restore
   error paths now have regression coverage.
 - Desk state delivery now retries after failure, sends the initial switch state,

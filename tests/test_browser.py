@@ -2,6 +2,8 @@
 import json
 import os
 import re
+import time
+from contextlib import ExitStack
 from pathlib import Path
 from urllib.parse import quote
 
@@ -23,7 +25,19 @@ def browser(request):
 
 
 @pytest.fixture
-def page(browser, request):
+def firmware_servers(tmp_path):
+    # Browser contexts must close before their server stops. Otherwise a live
+    # polling page can report teardown errors against an already closed socket.
+    with ExitStack() as servers:
+        def start(kind='door'):
+            directory = tmp_path / kind
+            directory.mkdir(exist_ok=True)
+            return servers.enter_context(FirmwareServer(directory, kind=kind))
+        yield start
+
+
+@pytest.fixture
+def page(browser, request, firmware_servers):
     context = browser.new_context(viewport={'width': 1100, 'height': 900})
     context.tracing.start(screenshots=True, snapshots=True, sources=True)
     page = context.new_page()
@@ -40,9 +54,8 @@ def page(browser, request):
 
 
 @pytest.fixture
-def door(tmp_path):
-    with FirmwareServer(tmp_path) as server:
-        yield server
+def door(firmware_servers):
+    return firmware_servers('door')
 
 
 def config_url(door):
@@ -177,6 +190,34 @@ def test_config_theme_validation_cancel_and_flash_failure(page, door):
     expect(page.locator('#glow')).to_have_text('OFF')
 
 
+def test_settings_navigation_stops_polling_and_back_resumes(page, door):
+    original_page = door.firmware.config_page
+    def slow_page():
+        # Keep a real navigation pending through two normal polling intervals.
+        time.sleep(2.1)
+        return original_page()
+    door.firmware.config_page = slow_page
+    navigation = {'started': False}
+    requests_during_navigation = []
+    def observe(request):
+        if '/config?' in request.url:
+            navigation['started'] = True
+        elif navigation['started'] and request.url.endswith('/api/state'):
+            requests_during_navigation.append(request.url)
+    page.on('request', observe)
+    page.goto(door.url + '/?token=' + quote(door.token, safe=''))
+    expect(page.locator('#mqttStatus')).to_have_text('MQTT: Disabled')
+    page.get_by_role('link', name='Settings').click()
+    expect(page.get_by_role('heading', name='Configuration')).to_be_visible()
+    assert navigation['started']
+    assert requests_during_navigation == []
+    navigation['started'] = False
+    page.go_back()
+    expect(page.locator('#glow')).to_have_text('OFF')
+    assert page.request.get(door.url + '/api/set', params={'on': '1', 'token': door.token}).ok
+    expect(page.locator('#glow')).to_have_text('ON')
+
+
 def test_mobile_pages_fit_viewport(page, door):
     page.set_viewport_size({'width': 375, 'height': 812})
     for url in (door.url, config_url(door)):
@@ -200,20 +241,20 @@ def test_bad_api_requests_do_not_take_server_down(page, door):
     assert page.request.get(door.url + '/api/state').json()['on'] is False
 
 
-def test_desk_first_boot_setup_form(page, tmp_path):
-    with FirmwareServer(tmp_path, kind='desk') as desk:
-        page.goto(desk.url)
-        expect(page.get_by_role('heading', name='DND Desk Setup')).to_be_visible()
-        expect(page.locator('#token')).to_have_value('')
-        page.locator('#ssid').fill('Lab café + &')
-        page.locator('#password').fill('password +&=é')
-        page.locator('#url').fill('http://door.test/api/set?room=office')
-        page.locator('#token').fill("token'&=é+")
-        page.get_by_role('button', name='Save & Reboot', exact=True).click()
-        expect(page.get_by_role('heading', name='Saved!')).to_be_visible()
-        settings, error = desk.config.load_config()
-        assert error is None
-        assert settings['wifi'] == {'ssid': 'Lab café + &', 'password': 'password +&=é'}
-        assert settings['security']['auth_token'] == "token'&=é+"
-        assert settings['desk']['receiver_url'] == 'http://door.test/api/set?room=office'
-        assert desk.reboots == 1
+def test_desk_first_boot_setup_form(page, firmware_servers):
+    desk = firmware_servers('desk')
+    page.goto(desk.url)
+    expect(page.get_by_role('heading', name='DND Desk Setup')).to_be_visible()
+    expect(page.locator('#token')).to_have_value('')
+    page.locator('#ssid').fill('Lab café + &')
+    page.locator('#password').fill('password +&=é')
+    page.locator('#url').fill('http://door.test/api/set?room=office')
+    page.locator('#token').fill("token'&=é+")
+    page.get_by_role('button', name='Save & Reboot', exact=True).click()
+    expect(page.get_by_role('heading', name='Saved!')).to_be_visible()
+    settings, error = desk.config.load_config()
+    assert error is None
+    assert settings['wifi'] == {'ssid': 'Lab café + &', 'password': 'password +&=é'}
+    assert settings['security']['auth_token'] == "token'&=é+"
+    assert settings['desk']['receiver_url'] == 'http://door.test/api/set?room=office'
+    assert desk.reboots == 1
