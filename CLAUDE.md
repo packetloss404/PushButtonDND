@@ -22,8 +22,12 @@ user setup and docs/feature-audit.md for test scope and remaining hardware work.
 - `mqtt_client.py` caches offline state, emits discovery/LWT/availability,
   preserves bounded packet reads, sends keepalive PING, and schedules backoff.
   DNS remains platform dependent; avoid claiming fully asynchronous operations.
-  Discovery uses the hardware client ID for nested prefixes and requests
+  Discovery uses the hardware client ID for prefixes with non-object-ID
+  characters and requests
   non-retained HA commands; retained state is a separate firmware behavior.
+  Incoming callbacks queue until the outer transport operation finishes. Keep
+  that guard: reentrant publishes can consume another publish's PUBACK. The
+  latest 16 queued commands are retained, dispatching one per loop operation.
 
 ## Behavioral contracts
 

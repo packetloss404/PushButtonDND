@@ -45,9 +45,13 @@ sender/handlers over TCP, adapting only socket stream and text/bytes compatibili
 - MQTT topic/credential strings now match the upstream bytes API. Failed setup
   closes sockets, background reconnect retains the client, offline state is
   cached and republished, and keepalive PING/deadline/retry behavior is covered.
-- Nested MQTT topic prefixes use a valid single-segment discovery object ID.
+- MQTT prefixes with non-object-ID characters use a valid discovery object ID.
   Discovery requests non-retained Home Assistant commands while state remains
   retained; README documents removal of a legacy retained command if present.
+- Incoming MQTT commands are deferred until the outer transport exchange
+  completes, fixing a reproduced reentrant QoS 1 PUBACK race. Exact upstream
+  packet-stream tests cover successful ACK ordering and failure-state caching.
+  A bounded queue keeps the latest 16 commands and dispatches one per operation.
 - Stale shared-default-token, TLS-port, guaranteed entity-ID, mDNS, DXF, and
   completed-hardware claims were corrected.
 

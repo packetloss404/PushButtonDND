@@ -141,7 +141,47 @@ class MQTTTests(unittest.TestCase):
         wire = FakeMQTT.instances[-1]
         wire.callback(b'unrelated/set', b'ON')
         wire.callback(b'pushbuttondnd/set', b'ON')
+        self.assertEqual(received, [])
+        self.client.check_messages()
         self.assertEqual(received, [(b'pushbuttondnd/set', b'ON')])
+
+    def test_connect_defers_commands_until_setup_finishes_and_reports_drain_failure(self):
+        original_subscribe = FakeMQTT.subscribe
+        original_publish = FakeMQTT.publish
+        callback_publications = []
+        def subscribe(wire, topic, qos):
+            original_subscribe(wire, topic, qos)
+            wire.callback(topic, b'ON')
+        def publish(wire, topic, message, retain, qos):
+            if topic == b'pushbuttondnd/state' and message == b'ON':
+                callback_publications.extend(wire.publications)
+                raise OSError('Command state publication failed')
+            original_publish(wire, topic, message, retain, qos)
+        self.client.message_callback = lambda topic, message: self.client.publish_state(True)
+        with patch.object(FakeMQTT, 'subscribe', subscribe), patch.object(FakeMQTT, 'publish', publish):
+            self.assertFalse(self.client.connect())
+        self.assertEqual(callback_publications[-1], (b'pushbuttondnd/availability', b'online', True, 1))
+        self.assertFalse(self.client.connected)
+        self.assertTrue(self.client._state)
+        self.assertEqual(self.client._transport_depth, 0)
+
+    def test_command_burst_queue_is_bounded_and_keeps_latest_in_order(self):
+        received = []
+        self.client.message_callback = lambda topic, message: received.append(message)
+        self.assertTrue(self.client.connect())
+        wire = FakeMQTT.instances[-1]
+        for number in range(20):
+            wire.callback(b'pushbuttondnd/set', str(number).encode())
+        self.assertEqual(len(self.client._pending_commands), 16)
+        self.client.check_messages()
+        self.assertEqual(received, [b'4'])
+        self.assertEqual(len(self.client._pending_commands), 15)
+        # Offline polling also drains queued desired states between retries.
+        self.client._drop_connection()
+        for unused in range(15):
+            self.client.reconnect_nonblocking()
+        self.assertEqual(received, [str(number).encode() for number in range(4, 20)])
+        self.assertEqual(self.client._pending_commands, [])
 
     def test_keepalive_ping_and_pending_packet_timeout(self):
         self.assertTrue(self.client.connect())

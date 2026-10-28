@@ -90,6 +90,33 @@ class MQTTClient:
         self._reconnect_after = 0
         self._gave_up = False
         self._connect_deadline = None
+        self._transport_depth = 0
+        self._dispatching_commands = False
+        self._pending_commands = []
+        self.max_pending_commands = 16
+
+    def _leave_transport(self):
+        self._transport_depth -= 1
+        self._dispatch_commands()
+
+    def _dispatch_commands(self):
+        # umqtt invokes callbacks from wait_msg(), including inside a QoS 1
+        # publish. Publishing a response there can consume the outer PUBACK.
+        if self._transport_depth or self._dispatching_commands:
+            return
+        self._dispatching_commands = True
+        try:
+            # Apply one command per main-loop operation. A burst cannot turn
+            # several individually bounded state publishes into a WDT timeout.
+            if self._pending_commands:
+                topic, message = self._pending_commands.pop(0)
+                try:
+                    if self.message_callback:
+                        self.message_callback(topic, message)
+                except Exception as error:
+                    print('[MQTT] Command callback failed: {}'.format(error))
+        finally:
+            self._dispatching_commands = False
 
     def _drop_connection(self):
         self.connected = False
@@ -116,6 +143,7 @@ class MQTTClient:
         safely instead of falling back to an unbounded connection attempt.
         """
         self._drop_connection()
+        self._transport_depth += 1
         self._connect_deadline = time.ticks_add(time.ticks_ms(), 4000)
         try:
             from umqtt.simple import MQTTClient as MQTT
@@ -146,17 +174,18 @@ class MQTTClient:
             self._gave_up = False
             self._last_ping = time.ticks_ms()
             print('[MQTT] Connected and subscribed to ' + self.config['topic_prefix'] + '/set')
-            return True
         except Exception as error:
             print('[MQTT] Connection failed: {}'.format(error))
             self._drop_connection()
-            return False
         finally:
             self._connect_deadline = None
+            self._leave_transport()
+        return self.connected
 
     def publish(self, topic, payload, retain=False, qos=1):
         if not self.connected or not self.client:
             return False
+        self._transport_depth += 1
         try:
             self._bound_socket()
             self.client.publish(_bytes(topic), _bytes(payload), retain=retain, qos=qos)
@@ -165,6 +194,8 @@ class MQTTClient:
             print('[MQTT] Publish failed: {}'.format(error))
             self._drop_connection()
             return False
+        finally:
+            self._leave_transport()
 
     def publish_state(self, is_on):
         # Cache even while offline, so a reconnect never restores stale state.
@@ -192,7 +223,8 @@ class MQTTClient:
         # A nested MQTT prefix is valid for state/command topics but cannot be
         # used as a discovery object_id (it adds unsupported path components).
         object_id = self.config['topic_prefix']
-        if '/' in object_id:
+        if any(not ('a' <= char <= 'z' or 'A' <= char <= 'Z' or
+                    '0' <= char <= '9' or char in '_-') for char in object_id):
             object_id = self.client_id
         return self.publish('homeassistant/light/' + object_id + '/config',
                             json.dumps(payload), retain=True, qos=1)
@@ -200,11 +232,11 @@ class MQTTClient:
     def _on_message_internal(self, topic, message):
         if topic != _bytes(self.config['topic_prefix'] + '/set'):
             return
-        try:
-            if self.message_callback:
-                self.message_callback(topic, message)
-        except Exception as error:
-            print('[MQTT] Command callback failed: {}'.format(error))
+        # Light commands represent desired state. Retain the most recent
+        # commands during bursts without allocating an unbounded ESP32 queue.
+        if len(self._pending_commands) >= self.max_pending_commands:
+            self._pending_commands.pop(0)
+        self._pending_commands.append((topic, message))
 
     def check_messages(self):
         """Poll input and send a PING every half keepalive interval.
@@ -213,7 +245,9 @@ class MQTTClient:
         acknowledgements use the bounded socket timeout.
         """
         if not self.connected or not self.client:
+            self._dispatch_commands()
             return
+        self._transport_depth += 1
         try:
             self._bound_socket()
             self.client.check_msg()
@@ -225,9 +259,12 @@ class MQTTClient:
         except Exception as error:
             print('[MQTT] Message check failed: {}'.format(error))
             self._drop_connection()
+        finally:
+            self._leave_transport()
 
     def reconnect_nonblocking(self):
         """Schedule one bounded connection attempt without sleeping for backoff."""
+        self._dispatch_commands()
         if self.connected:
             return 'connected'
         if self._gave_up or self.retry_count >= self.max_retries:

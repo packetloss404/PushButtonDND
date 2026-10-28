@@ -224,9 +224,10 @@ def test_real_broker_transport_recovery_restores_latest_offline_state(wire):
     assert firmware.connected
 
 
-def test_real_broker_nested_prefix_has_valid_discovery_topic(wire):
+@pytest.mark.parametrize('suffix', ['/office/door', '.office', ' Office', '_café'])
+def test_real_broker_prefix_has_valid_discovery_topic(wire, suffix):
     firmware = wire.firmware
-    firmware.config['topic_prefix'] = wire.prefix + '/office/door'
+    firmware.config['topic_prefix'] = wire.prefix + suffix
     assert firmware.connect()
     observer, messages = wire.observer()
     discovery_topic = 'homeassistant/light/' + firmware.client_id + '/config'
@@ -234,6 +235,6 @@ def test_real_broker_nested_prefix_has_valid_discovery_topic(wire):
     eventually(observer.check_msg, lambda: bool(messages))
     assert messages[0][0] == discovery_topic
     payload = json.loads(messages[0][1])
-    assert payload['state_topic'] == wire.prefix + '/office/door/state'
-    assert payload['command_topic'] == wire.prefix + '/office/door/set'
+    assert payload['state_topic'] == wire.prefix + suffix + '/state'
+    assert payload['command_topic'] == wire.prefix + suffix + '/set'
     assert payload['retain'] is False

@@ -166,7 +166,8 @@ With the default prefix `pushbuttondnd`:
 | `pushbuttondnd/availability` | Retained `online`; LWT/clean disconnect `offline` |
 | `homeassistant/light/pushbuttondnd/config` | Retained Home Assistant discovery JSON |
 
-For a prefix containing `/`, discovery instead uses
+For a prefix containing characters outside ASCII letters, digits, `_`, and `-`
+(including `/`, spaces, periods, or Unicode), discovery instead uses
 `homeassistant/light/<hardware-client-id>/config` so its object ID remains one
 path segment; state, command, and availability topics keep the full prefix.
 
@@ -195,6 +196,9 @@ at most ten attempts before giving up. WiFi recovery resets retries; rebooting
 also resets them. TCP/MQTT operations remain synchronous, with one-second socket
 timeouts and operation deadlines. DNS resolution can still block according to
 the MicroPython platform. This is not a fully asynchronous MQTT client.
+Incoming commands wait until the active MQTT exchange finishes, preventing
+overlapping QoS 1 acknowledgements. A burst keeps the latest 16 commands and
+applies one per loop operation so state replies do not monopolize the watchdog.
 
 For local diagnosis:
 
